@@ -14,6 +14,12 @@ const el = (tag, attrs = {}, ...children) => {
 const button = (text, callback, cls = '') => el('button', {type:'button', class:cls, onclick:callback}, text);
 const state = {csrf:'', route:0, reader:null, selection:null, activeJobs:new Map(), sheet:0};
 const view = $('#app');
+// Older installed reading extensions also listen on document. Keep our reader and
+// dialog mouse events local so one gesture cannot start another model request.
+// selectionchange still reaches document for our own selection toolbar.
+for (const host of [view, $('#sheet')]) {
+  for (const type of ['dblclick', 'mouseup']) host.addEventListener(type, event => event.stopPropagation());
+}
 let toastTimer, progressTimer, readerScroll, progressAbort;
 function toast(text) {
   $('#toast').textContent = text; $('#toast').hidden = false;

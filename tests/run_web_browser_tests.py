@@ -17,6 +17,9 @@ def main():
     article = dict(index=0, title='Reading across devices', paragraphs=[
         f'Paragraph {i}. The writer gave a candid reply. ' + 'We read the world one sentence at a time. ' * 10
         for i in range(32)])
+    first_sentence = 'Cruz brought a little surprise to Isaacman’s confirmation hearing last April.'
+    article['paragraphs'][0] = (first_sentence + ' It was a poster of the moon. A candid reply followed. '
+        '“My team used ChatGPT,” explained the senator, who chairs the committee that oversees NASA.')
     store._atomic_json_write(config.app_dir() / 'cache/sample/content.json', dict(
         bookSize=WebTests.meta['size'], format='epub', articles=[article]))
     server = make_server('127.0.0.1', 0, app)
@@ -25,6 +28,10 @@ def main():
     url = f'http://127.0.0.1:{server.server_port}'
     errors = []
     requests = []
+    analysis_calls = []
+    def fake_analysis(meta, art, sentence, before, after, cfg, **kwargs):
+        analysis_calls.append(sentence)
+        return dict(grammarComponents=[], grammarPoints=[], vocab=[], translation='模拟句子讲解。')
     def fake_vocab(meta, art, level, cfg, **kwargs):
         kwargs['on_progress'](0,1,'test')
         kwargs['on_chars'](150)
@@ -40,6 +47,7 @@ def main():
         return '这是一个模拟回答。'
     try:
         with (sync_playwright() as playwright, patch.object(gen,'generate_vocab',side_effect=fake_vocab) as vocab,
+              patch.object(gen,'analyze',side_effect=fake_analysis),
               patch.object(llm,'conversation',side_effect=fake_discussion), patch.object(core_dict,'lookup_many',return_value={})):
             chrome=os.environ.get('KANDU_TEST_CHROME')
             browser=playwright.chromium.launch(**({'executable_path':chrome} if chrome else {}),headless=True)
@@ -63,6 +71,21 @@ def main():
             expect(page.locator('.state-pill')).to_have_text('已读')
             page.locator('.card-bottom a').click()
             expect(page.locator('.paragraph')).to_have_count(32)
+            # Model an older installed extension: it listens on document in the bubble phase.
+            # Opening a dialog must not allow the same mouse event to start a second analysis.
+            page.evaluate('''() => {
+                window.externalReaderEvents = {dblclick:0, mouseup:0};
+                for (const type of ['dblclick', 'mouseup']) document.addEventListener(type, event => {
+                    if (event.target.closest('.paragraph, #sheet')) window.externalReaderEvents[type]++;
+                });
+            }''')
+            page.locator('#para-0 p').dblclick(position={'x':18, 'y':14})
+            expect(page.locator('#sheet-content .analysis-sentence')).to_have_text(first_sentence)
+            page.locator('#sheet-content .analysis-sentence').dblclick()
+            page.locator('#sheet-close').click()
+            expect(page.locator('#sheet')).not_to_be_visible()
+            assert analysis_calls == [first_sentence], analysis_calls
+            assert page.evaluate('() => window.externalReaderEvents') == {'dblclick':0, 'mouseup':0}
             expect(page.locator('#badge-0')).to_contain_text('待生成')
             page.locator('#badge-0').click()
             expect(page.locator('#sheet')).to_be_visible()
@@ -107,7 +130,7 @@ def main():
             assert width['scroll']<=width['width'],width
             assert not errors,errors
             assert not requests,requests
-            print('BROWSER PASS: desktop + 390px phone; login, mark, vocab generation, collection, discussion, progress sync, edit, no overflow/errors')
+            print('BROWSER PASS: desktop + 390px phone; sentence double-click isolated from legacy extension, login, mark, vocab generation, collection, discussion, progress sync, edit, no overflow/errors')
             browser.close()
     finally:
         server.shutdown()
