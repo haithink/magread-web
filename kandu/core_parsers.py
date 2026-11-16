@@ -1,0 +1,702 @@
+"""EPUB / PDF 解析 + 刊物库扫描与缓存（对齐 Android 版 BookStore 目录结构）。"""
+import hashlib
+import json
+import re
+import threading
+import zipfile
+import xml.etree.ElementTree as ET
+from functools import lru_cache
+from pathlib import Path
+
+import pymupdf
+from bs4 import BeautifulSoup
+
+from . import core_config as cfgmod
+from . import core_pdf
+
+PDF_PARSER_VERSION = core_pdf.PARSER_VERSION
+_CONTENT_LOCKS = {}
+_CONTENT_LOCKS_GUARD = threading.Lock()
+
+WATERMARK = re.compile(r"(?i)zlibrary|this (article|file) was downloaded by|中商海外高资")
+SKIP_NAME = ["cover", "toc", "ad_page", "masthead", "titlepage", "title_page", "colophon", "nav"]
+BAD_ID = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def sanitize_id(name: str) -> str:
+    return BAD_ID.sub("_", name) or "book"
+
+
+def scan(library_dir: str):
+    """扫描目录下的 epub/pdf，返回 BookMeta 字典列表。"""
+    if not library_dir:
+        return []
+    root = Path(library_dir)
+    if not root.is_dir():
+        return []
+    metas = []
+    for p in sorted(root.iterdir(), key=lambda x: x.name, reverse=True):
+        if not p.is_file():
+            continue
+        lower = p.name.lower()
+        if lower.endswith(".epub"):
+            ext = "epub"
+        elif lower.endswith(".pdf"):
+            ext = "pdf"
+        else:
+            continue
+        metas.append(
+            {
+                "id": sanitize_id(p.name[: -(len(ext) + 1)]),
+                "fileName": p.name,
+                "ext": ext,
+                "size": p.stat().st_size,
+                "lastModified": int(p.stat().st_mtime * 1000),
+                "path": str(p),
+            }
+        )
+    return metas
+
+
+# ---------------- EPUB ----------------
+
+_NS = "{http://www.idpf.org/2007/opf}"
+_DC = "{http://purl.org/dc/elements/1.1/}"
+
+
+def _read_entry(zf: zipfile.ZipFile, name: str):
+    try:
+        return zf.read(name)
+    except KeyError:
+        return None
+
+
+def _parse_container(data: bytes):
+    try:
+        root = ET.fromstring(data)
+        for rf in root.iter():
+            if rf.tag.endswith("rootfile"):
+                full = rf.get("full-path")
+                if full:
+                    return full
+    except Exception:
+        pass
+    return None
+
+
+def _normalize_path(dir_part: str, href: str) -> str:
+    from urllib.parse import unquote
+
+    raw = unquote(href)
+    combined = f"{dir_part}/{raw}" if dir_part else raw
+    stack = []
+    for seg in combined.split("/"):
+        if seg in ("", "."):
+            continue
+        if seg == "..":
+            if stack:
+                stack.pop()
+        else:
+            stack.append(seg)
+    return "/".join(stack)
+
+
+def _parse_opf(data: bytes):
+    """返回 (cover_href, spine_hrefs)。"""
+    manifest = {}
+    spine = []
+    cover_id = None
+    try:
+        root = ET.fromstring(data)
+    except Exception:
+        return None, []
+    for el in root.iter():
+        tag = el.tag.split("}")[-1]
+        if tag == "item":
+            iid = el.get("id")
+            if iid:
+                manifest[iid] = {
+                    "href": el.get("href") or "",
+                    "mediaType": el.get("media-type") or "",
+                    "properties": el.get("properties") or "",
+                }
+        elif tag == "meta" and el.get("name") == "cover":
+            cover_id = el.get("content")
+        elif tag == "itemref" and el.get("idref"):
+            spine.append(el.get("idref"))
+
+    cover_href = None
+    if cover_id and cover_id in manifest:
+        cover_href = manifest[cover_id]["href"] or None
+    if not cover_href:
+        for it in manifest.values():
+            if "cover-image" in it["properties"].split():
+                cover_href = it["href"]
+                break
+    if not cover_href:
+        for it in manifest.values():
+            if it["mediaType"].startswith("image/") and "cover" in it["href"].lower():
+                cover_href = it["href"]
+                break
+    hrefs = [manifest[i]["href"] for i in spine if i in manifest and manifest[i]["href"]]
+    if not cover_href:
+        for h in hrefs:
+            if "cover" in h.lower():
+                cover_href = h
+                break
+    return cover_href, hrefs
+
+
+def _is_skippable(href: str) -> bool:
+    name = href.split("/")[-1].lower()
+    return any(s in name for s in SKIP_NAME)
+
+
+def _parse_article_html(index: int, data: bytes):
+    html = data.decode("utf-8", "ignore")
+    soup = BeautifulSoup(html, "html.parser")
+    title = ""
+    for sel in ("h1", "h2", "h3"):
+        el = soup.find(sel)
+        if el and el.get_text(strip=True):
+            title = el.get_text(" ", strip=True).strip()
+            break
+    paragraphs = []
+    for p in soup.find_all("p"):
+        text = p.get_text(" ", strip=True).replace(" ", " ").strip()
+        if not text:
+            continue
+        if WATERMARK.search(text):
+            continue
+        if len(text) == 1 and not text[0].isalpha():
+            continue
+        paragraphs.append(text)
+    total = sum(len(t) for t in paragraphs)
+    if not paragraphs or total < 30:
+        return None
+    if not title and len(paragraphs) < 2:
+        return None
+    return {"index": index, "title": title or paragraphs[0][:60], "paragraphs": paragraphs}
+
+
+def epub_parse(file_path: str):
+    """返回 (cover_bytes, articles)。文章按 spine 顺序编号。"""
+    cover_bytes = None
+    articles = []
+    with zipfile.ZipFile(file_path) as zf:
+        names = set(zf.namelist())
+        opf_path = None
+        if "META-INF/container.xml" in names:
+            opf_path = _parse_container(zf.read("META-INF/container.xml"))
+        if not opf_path:
+            for n in zf.namelist():
+                if n.lower().endswith(".opf"):
+                    opf_path = n
+                    break
+        opf_path = opf_path or "EPUB/content.opf"
+        opf = _read_entry(zf, opf_path)
+        if opf is None:
+            raise ValueError(f"EPUB 中找不到 OPF：{opf_path}")
+        info = _parse_opf(opf)
+        cover_href, spine_hrefs = info
+        opf_dir = opf_path.rsplit("/", 1)[0] if "/" in opf_path else ""
+        if cover_href:
+            cover_bytes = _read_entry(zf, _normalize_path(opf_dir, cover_href))
+        for href in spine_hrefs:
+            if _is_skippable(href):
+                continue
+            data = _read_entry(zf, _normalize_path(opf_dir, href))
+            if data is None:
+                continue
+            art = _parse_article_html(len(articles), data)
+            if art:
+                articles.append(art)
+    return cover_bytes, articles
+
+
+def epub_cover_stream(file_path: str):
+    """轻量封面提取（一次流式扫描）。"""
+    container = None
+    opf_candidates = {}
+    image_candidates = {}
+    with zipfile.ZipFile(file_path) as zf:
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            name = info.filename
+            lower = name.lower()
+            try:
+                if lower == "meta-inf/container.xml":
+                    container = zf.read(name)
+                elif lower.endswith(".opf") and info.file_size < 2_000_000:
+                    opf_candidates[name] = zf.read(name)
+                elif (
+                    lower.endswith((".jpg", ".jpeg", ".png", ".webp"))
+                    and info.file_size < 1_200_000
+                    and "cover" in lower
+                ):
+                    image_candidates[name] = zf.read(name)
+            except Exception:
+                continue
+    opf_path = _parse_container(container) if container else None
+    opf_bytes = None
+    if opf_path:
+        opf_bytes = opf_candidates.get(opf_path)
+    if opf_bytes is None and opf_candidates:
+        opf_bytes = next(iter(opf_candidates.values()))
+    cover_href = _parse_opf(opf_bytes)[0] if opf_bytes else None
+    from urllib.parse import unquote
+
+    if cover_href:
+        for cand in (cover_href, unquote(cover_href)):
+            if cand in image_candidates:
+                return image_candidates[cand]
+        tail = cover_href.split("/")[-1].lower()
+        for name, data in image_candidates.items():
+            if name.lower().endswith(tail):
+                return data
+    return max(image_candidates.values(), key=len) if image_candidates else None
+
+
+# ---------------- PDF ----------------
+
+def pdf_parse(file_path: str):
+    """优先按叶级书签目录切文章，无书签时尝试可点击目录。"""
+    return core_pdf.parse(file_path)
+
+
+def pdf_cover(file_path: str, target_width: int = 480):
+    """渲染首页 PNG 字节，失败返回 None。"""
+    try:
+        doc = pymupdf.open(file_path)
+        try:
+            page = doc[0]
+            zoom = target_width / page.rect.width
+            pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom))
+            return pix.tobytes("png")
+        finally:
+            doc.close()
+    except Exception:
+        return None
+
+
+# ---------------- 缓存与库存 ----------------
+
+def _cache_dir(book_id: str) -> Path:
+    d = cfgmod.app_dir() / "cache" / book_id
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def covers_dir() -> Path:
+    return cfgmod._sub("covers")
+
+
+def cover_file(book_id: str) -> Path:
+    return covers_dir() / f"{book_id}.jpg"
+
+
+def has_cover(book_id: str) -> bool:
+    return cover_file(book_id).exists()
+
+
+def ensure_cover(meta: dict) -> str | None:
+    out = cover_file(meta["id"])
+    if out.exists():
+        return str(out)
+    data = None
+    if meta["ext"] == "epub":
+        try:
+            data = epub_cover_stream(meta["path"])
+        except Exception:
+            data = None
+        if data is None:
+            try:
+                data = epub_parse(meta["path"])[0]
+            except Exception:
+                data = None
+    else:
+        data = pdf_cover(meta["path"])
+    if data:
+        try:
+            from PIL import Image
+            import io
+
+            img = Image.open(io.BytesIO(data)).convert("RGB")
+            img.save(out, "JPEG", quality=85)
+            return str(out)
+        except Exception:
+            return None
+    return None
+
+
+def _json_read(p: Path):
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _json_write(p: Path, obj):
+    p.write_text(json.dumps(obj, ensure_ascii=False), encoding="utf-8")
+
+
+def has_content(meta: dict) -> bool:
+    """正文索引已存在且与源文件大小匹配。"""
+    f = _cache_dir(meta["id"]) / "content.json"
+    if not f.exists():
+        return False
+    try:
+        import json
+        return _content_current(meta, json.loads(f.read_text(encoding="utf-8")))
+    except Exception:
+        return False
+
+
+def ensure_content(meta: dict) -> dict:
+    """同刊解析串行，PDF 解析器升级时自动迁移旧整本文档缓存。"""
+    with _CONTENT_LOCKS_GUARD:
+        lock = _CONTENT_LOCKS.setdefault(meta["id"], threading.RLock())
+    with lock:
+        return _ensure_content(meta)
+
+
+def _content_current(meta, cache):
+    return (isinstance(cache, dict) and cache.get("bookSize") == meta["size"]
+            and (meta["ext"] != "pdf" or cache.get("pdfParserVersion") == PDF_PARSER_VERSION))
+
+
+def _ensure_content(meta):
+    cf = _cache_dir(meta["id"]) / "content.json"
+    cache = _json_read(cf)
+    if _content_current(meta, cache):
+        return {
+            "bookId": meta["id"],
+            "format": cache["format"],
+            "articles": cache["articles"],
+        }
+    if meta["ext"] == "epub":
+        _cover, articles = epub_parse(meta["path"])
+        fmt = "epub"
+    else:
+        articles = pdf_parse(meta["path"])
+        fmt = "pdf"
+    payload = {"bookSize": meta["size"], "format": fmt, "articles": articles}
+    if fmt == "pdf":
+        payload["pdfParserVersion"] = PDF_PARSER_VERSION
+        if cache and cache.get("pdfParserVersion") != PDF_PARSER_VERSION:
+            _migrate_pdf_cache(meta, cache, articles)
+    _atomic_json_write(cf, payload)
+    return {"bookId": meta["id"], "format": fmt, "articles": articles}
+
+
+def _migrate_pdf_cache(meta, old, articles):
+    import shutil
+
+    folder = _cache_dir(meta["id"])
+    backup = folder / f"before_pdf_v{PDF_PARSER_VERSION}"
+    backup.mkdir(exist_ok=True)
+    files = [folder / "content.json", folder / "digest.json", *folder.glob("vocab_*.json"),
+             *folder.glob("analysis_*.json")]
+    backups = [(source, backup / source.name) for source in files]
+    backups.extend([(_reading_history_file(meta["id"]), backup / "reading_history.json"),
+                    (_article_states_file(meta["id"]), backup / "article_states.json")])
+    for source, destination in backups:
+        if source.exists() and not destination.exists():
+            shutil.copy2(source, destination)
+    legacy_articles = old.get("articles", [])
+    if len(legacy_articles) == 1 and not old.get("pdfParserVersion"):
+        history = _json_read(backup / "reading_history.json") or {}
+        migrated = {}
+        record = history.get("0")
+        if record:
+            moved = core_pdf.relocate_legacy_record(meta["path"], legacy_articles[0], record, articles)
+            if moved:
+                index, position = moved
+                migrated[str(index)] = position
+        if history:
+            _atomic_json_write(_reading_history_file(meta["id"]), migrated)
+        if _article_states_file(meta["id"]).exists():
+            _atomic_json_write(_article_states_file(meta["id"]), {})
+    # 旧索引下的词表和句解不能套到新文章上，原内容保存在备份目录。
+    for source in files[1:]:
+        source.unlink(missing_ok=True)
+
+
+def load_digest(book_id: str):
+    folder = _cache_dir(book_id)
+    digest = _json_read(folder / "digest.json")
+    if digest:
+        content = _content_signature(folder / "content.json")
+        if content and content.get("format") == "pdf" and (
+                content.get("pdfParserVersion") != PDF_PARSER_VERSION
+                or digest.get("pdfParserVersion") != PDF_PARSER_VERSION
+                or digest.get("pdfSourceSize") != content.get("bookSize")):
+            return None
+    return digest
+
+
+def _content_signature(path):
+    try:
+        stat = path.stat()
+        return _cached_content_signature(str(path), stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        return None
+
+
+@lru_cache(maxsize=128)
+def _cached_content_signature(path, mtime_ns, size):
+    # 首页只需版本信息；同一正文文件不在每次筛选、刷新时重新解码。
+    try:
+        with Path(path).open(encoding="utf-8") as source:
+            prefix = source.read(512)
+        fmt = re.search(r'"format"\s*:\s*"(epub|pdf)"', prefix)
+        if fmt and fmt[1] == "epub":
+            return {"format": "epub"}
+    except OSError:
+        return None
+    content = _json_read(Path(path))
+    return {key: content.get(key) for key in ("format", "bookSize", "pdfParserVersion")} if content else None
+
+
+def save_digest(digest: dict):
+    _json_write(_cache_dir(digest["bookId"]) / "digest.json", digest)
+
+
+ARTICLE_STATES = ("unread", "read", "uninterested")
+
+
+def _article_states_file(book_id: str) -> Path:
+    # 阅读记录属于用户数据，独立于可重新生成的摘要/正文缓存。
+    return cfgmod.app_dir() / "article_states" / f"{sanitize_id(book_id)}.json"
+
+
+def load_article_states(book_id: str) -> dict:
+    """返回文章索引到手动阅读状态的映射；未记录的文章默认为未读。"""
+    data = _json_read(_article_states_file(book_id))
+    if not isinstance(data, dict):
+        return {}
+    return {k: v for k, v in data.items()
+            if k.isdecimal() and v in ARTICLE_STATES}
+
+
+def set_article_state(book_id: str, article_index: int, state: str) -> dict:
+    """原子保存单篇文章的标记，保留本刊其他文章的记录。"""
+    if state not in ARTICLE_STATES:
+        raise ValueError(f"未知阅读状态：{state}")
+    if type(article_index) is not int or article_index < 0:
+        raise ValueError("文章索引必须是非负整数")
+    states = load_article_states(book_id)
+    states[str(article_index)] = state
+    _atomic_json_write(_article_states_file(book_id), states)
+    return states
+
+
+def _atomic_json_write(target: Path, data):
+    import os
+    import tempfile
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", suffix=".tmp",
+                                         dir=target.parent, delete=False) as f:
+            temp_path = Path(f.name)
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(temp_path, target)
+    finally:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+
+
+def _reading_history_file(book_id: str) -> Path:
+    return cfgmod.app_dir() / "reading_history" / f"{sanitize_id(book_id)}.json"
+
+
+def _reading_record(data):
+    """只接受可恢复的阅读位置，损坏的单条记录不影响其他文章。"""
+    import math
+
+    if not isinstance(data, dict) or not isinstance(data.get("title"), str) or not data["title"]:
+        return None
+    numeric = ("paragraphIndex", "paragraphOffset", "paragraphCount", "wordCount", "lastReadAt")
+    if any(type(data.get(k)) is not int or data[k] < 0 for k in numeric):
+        return None
+    progress = data.get("progress")
+    if type(progress) not in (int, float) or not math.isfinite(progress) or not 0 <= progress <= 1:
+        return None
+    if any(not isinstance(data.get(k, ""), str) for k in ("titleZh", "paragraphStart")):
+        return None
+    return {**{k: data[k] for k in numeric}, "title": data["title"],
+            "titleZh": data.get("titleZh", ""), "paragraphStart": data.get("paragraphStart", ""),
+            "progress": progress, "atStart": data.get("atStart") is True,
+            "atEnd": data.get("atEnd") is True}
+
+
+def load_reading_history(book_id: str) -> dict:
+    """阅读历史与位置独立于内容缓存和手动已读标记。"""
+    data = _json_read(_reading_history_file(book_id))
+    if not isinstance(data, dict):
+        return {}
+    return {key: record for key, value in data.items()
+            if key.isdecimal() and (record := _reading_record(value)) is not None}
+
+
+def save_reading_progress(book_id: str, article_index: int, progress: dict) -> dict:
+    import time
+
+    if type(article_index) is not int or article_index < 0:
+        raise ValueError("文章索引必须是非负整数")
+    record = _reading_record(dict(progress, lastReadAt=int(time.time() * 1000)))
+    if record is None:
+        raise ValueError("阅读位置无效")
+    history = load_reading_history(book_id)
+    history[str(article_index)] = record
+    _atomic_json_write(_reading_history_file(book_id), history)
+    return record
+
+
+def has_digest(book_id: str) -> bool:
+    folder = _cache_dir(book_id)
+    if not (folder / "digest.json").is_file():
+        return False
+    content = _content_signature(folder / "content.json")
+    if not content or content.get("format") != "pdf":
+        return True
+    return load_digest(book_id) is not None
+
+
+def load_vocab(book_id: str, article_index: int, level: str):
+    return _json_read(_cache_dir(book_id) / f"vocab_{article_index}_{level}.json")
+
+
+def save_vocab(book_id: str, vocab: dict):
+    _json_write(
+        _cache_dir(book_id) / f"vocab_{vocab['articleIndex']}_{vocab['level']}.json",
+        vocab,
+    )
+
+
+def analysis_key(book_id: str, article_index: int, text: str) -> str:
+    return hashlib.sha1(f"{book_id}|{article_index}|{text}".encode("utf-8")).hexdigest()
+
+
+def load_analysis(book_id: str, text: str, article_index: int):
+    return _json_read(_cache_dir(book_id) / f"analysis_{analysis_key(book_id, article_index, text)}.json")
+
+
+def save_analysis(book_id: str, text: str, article_index: int, analysis: dict):
+    _json_write(
+        _cache_dir(book_id) / f"analysis_{analysis_key(book_id, article_index, text)}.json",
+        analysis,
+    )
+
+
+def purge_all():
+    import shutil
+
+    for name in ("cache", "books", "covers"):
+        p = cfgmod.app_dir() / name
+        if p.exists():
+            shutil.rmtree(p, ignore_errors=True)
+
+
+# ---------------- 书库（应用自管，不依赖磁盘目录） ----------------
+
+def library_file() -> Path:
+    return cfgmod.app_dir() / "books.json"
+
+
+def load_library():
+    lib = library_file()
+    if not lib.exists():
+        return []
+    try:
+        import json
+        return json.loads(lib.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+
+def save_library(entries):
+    import json
+    library_file().write_text(json.dumps(entries, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def add_book(src: str, books_dir: str):
+    """把刊物文件复制进书库存储并返回 (meta, status)；status: added/exists。"""
+    import json
+    import shutil
+    import time
+    from pathlib import Path
+
+    src = Path(src)
+    ext = src.suffix.lower().lstrip(".")
+    if ext not in ("epub", "pdf"):
+        raise ValueError(f"不支持的格式：{src.suffix}")
+    bd = Path(books_dir)
+    bd.mkdir(parents=True, exist_ok=True)
+    bid = sanitize_id(src.stem)
+    dst = bd / f"{bid}.{ext}"
+    status = "exists" if dst.exists() else "added"
+    if not dst.exists():
+        shutil.copy2(str(src), str(dst))
+    meta = {
+        "id": bid,
+        "fileName": src.name,
+        "ext": ext,
+        "size": dst.stat().st_size,
+        "lastModified": int(dst.stat().st_mtime * 1000),
+        "path": str(dst),
+        "addedAt": int(time.time() * 1000),
+    }
+    entries = load_library()
+    entries = [e for e in entries if e.get("id") != bid]
+    entries.append(meta)
+    entries.sort(key=lambda e: e.get("addedAt", 0), reverse=True)
+    save_library(entries)
+    return meta, status
+
+
+def remove_book(book_id: str):
+    """从书库移除：删除登记、书库内文件副本、缓存/封面与阅读标记。"""
+    entries = [e for e in load_library() if e.get("id") != book_id]
+    save_library(entries)
+    settings = cfgmod.load_settings()
+    for f in Path(cfgmod.books_dir(settings)).glob(f"{book_id}.*"):
+        f.unlink(missing_ok=True)
+    purge_book_cache(book_id)
+    _article_states_file(book_id).unlink(missing_ok=True)
+    _reading_history_file(book_id).unlink(missing_ok=True)
+
+
+def get_book(book_id: str):
+    for e in load_library():
+        if e.get("id") == book_id:
+            return e
+    return None
+
+
+def purge_digests():
+    """清空所有书目的摘要缓存（保留正文/生词/句解）。"""
+    cache_root = cfgmod.app_dir() / "cache"
+    if not cache_root.exists():
+        return 0
+    n = 0
+    for f in cache_root.glob("*/digest.json"):
+        f.unlink(missing_ok=True)
+        n += 1
+    return n
+
+
+def purge_book_cache(book_id: str, digest_only: bool = False):
+    """清除单本书缓存；digest_only=True 仅删摘要，否则整本缓存+封面。"""
+    d = cfgmod.app_dir() / "cache" / book_id
+    if digest_only:
+        (d / "digest.json").unlink(missing_ok=True)
+        return
+    import shutil
+
+    if d.exists():
+        shutil.rmtree(d, ignore_errors=True)
+    cover_file(book_id).unlink(missing_ok=True)
