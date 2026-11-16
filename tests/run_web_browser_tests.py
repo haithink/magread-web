@@ -11,6 +11,52 @@ from run_web_tests import WebTests, SANDBOX, config, store, gen, llm, core_dict,
 from playwright.sync_api import sync_playwright, expect
 
 
+def check_vocab_scroll_isolation(page, paragraph, long_list=False):
+    page.locator(f'#badge-{paragraph}').scroll_into_view_if_needed()
+    page.wait_for_timeout(1200)
+    def snapshot():
+        return page.evaluate('''() => ({y:scrollY,
+            progress:document.querySelector('#reader-progress-bar').value,
+            paragraph:document.querySelector('#reader-paragraph').textContent})''')
+    before = snapshot()
+    record = store.load_reading_history('sample')['0']
+    saved_position = (record['paragraphIndex'], record['paragraphOffset'])
+    page.locator(f'#badge-{paragraph}').click()
+    sheet = page.locator('#sheet')
+    expect(sheet).to_be_visible()
+    assert snapshot() == before, (before, snapshot())
+    assert sheet.evaluate('(node) => node.scrollHeight > node.clientHeight') == long_list
+    bounds = sheet.bounding_box()
+    page.mouse.move(bounds['x'] + bounds['width'] / 2, bounds['y'] + bounds['height'] / 2)
+    page.mouse.wheel(0, -1200)
+    page.wait_for_timeout(250)
+    page.mouse.wheel(0, 350)
+    page.wait_for_timeout(250)
+    if long_list:
+        assert sheet.evaluate('(node) => node.scrollTop') > 0
+    sheet.evaluate('(node) => node.scrollTop = node.scrollHeight')
+    page.mouse.wheel(0, 1200)
+    page.wait_for_timeout(250)
+    page.mouse.wheel(0, 1200)
+    page.wait_for_timeout(250)
+    page.mouse.move(2, 2)  # The modal backdrop must also leave the article stationary.
+    page.mouse.wheel(0, 1200)
+    page.wait_for_timeout(1100)
+    assert snapshot() == before, (before, snapshot())
+    record = store.load_reading_history('sample')['0']
+    assert (record['paragraphIndex'], record['paragraphOffset']) == saved_position, record
+    if long_list:
+        page.keyboard.press('Escape')
+    else:
+        page.locator('#sheet-close').click()
+    expect(sheet).not_to_be_visible()
+    assert snapshot() == before, (before, snapshot())
+    page.mouse.move(page.viewport_size['width'] / 2, page.viewport_size['height'] / 2)
+    page.mouse.wheel(0, 200)
+    page.wait_for_timeout(350)
+    assert snapshot()['y'] > before['y'], 'Article scrolling must resume after closing the dialog'
+
+
 def main():
     WebTests.setUpClass()
     app = WebTests.app
@@ -37,7 +83,10 @@ def main():
         kwargs['on_chars'](150)
         time.sleep(.2)
         result=dict(articleIndex=0,level=level,titleEntries=[],processedParagraphs=[-1,*range(32)],
-            paragraphs=[dict(index=i,entries=[dict(word='candid',sense='坦率的',inText='a candid reply')]) for i in range(32)])
+            paragraphs=[dict(index=i,entries=[dict(word='candid',sense='坦率的',inText='a candid reply')]
+                + ([dict(word=word,sense='模拟词义',inText=word) for word in
+                    ['stubborn','chart','determination','pursue','novel','insight','subtle','vivid','resolve','strive','persist']]
+                    if i == 19 else [])) for i in range(32)])
         store.save_vocab(meta['id'],result)
         return result
     def fake_discussion(cfg,system,messages,on_text,control):
@@ -104,6 +153,8 @@ def main():
             page.locator('#sheet-close').click()
             expect(page.locator('#badge-0')).to_have_text('词 1 · 本段生词')
             assert vocab.call_count==1
+            check_vocab_scroll_isolation(page, 18)
+            check_vocab_scroll_isolation(page, 19, long_list=True)
             page.locator('#para-19').scroll_into_view_if_needed()
             time.sleep(1.3)
             record=store.load_reading_history('sample')['0']
@@ -121,6 +172,8 @@ def main():
             assert abs(store.load_reading_history('sample')['0']['paragraphIndex']-stored_paragraph)<=1
             width=phone.evaluate('() => ({scroll:document.documentElement.scrollWidth, width:innerWidth})')
             assert width['scroll']<=width['width'],width
+            check_vocab_scroll_isolation(phone, 18)
+            check_vocab_scroll_isolation(phone, 19, long_list=True)
             phone.locator('.reader-toolbar').get_by_role('button',name='与 AI 讨论').click()
             phone.locator('.discussion-input textarea').fill('作者想表达什么？')
             phone.locator('.discussion-input button[type=submit]').click()
@@ -158,7 +211,7 @@ def main():
             assert width['scroll']<=width['width'],width
             assert not errors,errors
             assert not requests,requests
-            print('BROWSER PASS: desktop + 390px phone; live progress, recent word source/search/jump, legacy source fallback, isolated double-click, login, mark, vocab, discussion, sync, edit, no overflow/errors')
+            print('BROWSER PASS: desktop + 390px phone; modal wheel isolation, unchanged saved position, restored article scrolling, live progress, recent word source/search/jump, legacy source fallback, isolated double-click, login, mark, vocab, discussion, sync, edit, no overflow/errors')
             browser.close()
     finally:
         server.shutdown()
