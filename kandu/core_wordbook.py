@@ -54,8 +54,11 @@ def list_words(query=''):
     with connection() as db:
         rows = [_record(r) for r in db.execute('SELECT * FROM words ORDER BY updated_at DESC, word')]
     query = str(query).strip().casefold()
-    return [r for r in rows if not query or query in '\n'.join(
-        [r['word'], r['sense'], r['note'], *r['aliases']]).casefold()]
+    def searchable(record):
+        source = record['source'] if isinstance(record['source'], dict) else {}
+        return '\n'.join([record['word'], record['sense'], record['note'], *record['aliases'],
+            *[str(source.get(field) or '') for field in ('bookTitle', 'articleTitle', 'context')]]).casefold()
+    return [r for r in rows if not query or query in searchable(r)]
 
 
 def save(value, original=None):
@@ -129,7 +132,7 @@ def remember_entry(entry, source):
         for field in ('phonetic', 'pos', 'sense', 'root', 'note'):
             r[field] = r.get(field) or str(entry.get(field) or '').strip()[:12000]
         r['aliases'] = list(dict.fromkeys([*r['aliases'], raw]))
-        _write(db, dict(r, updated_at=now))
+        _write(db, dict(r, source=source, updated_at=now))
     return get(key)
 
 

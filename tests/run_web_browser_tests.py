@@ -7,7 +7,7 @@ import time
 from unittest.mock import patch
 from wsgiref.simple_server import make_server
 
-from run_web_tests import WebTests, SANDBOX, config, store, gen, llm, core_dict
+from run_web_tests import WebTests, SANDBOX, config, store, gen, llm, core_dict, wordbook
 from playwright.sync_api import sync_playwright, expect
 
 
@@ -71,6 +71,8 @@ def main():
             expect(page.locator('.state-pill')).to_have_text('已读')
             page.locator('.card-bottom a').click()
             expect(page.locator('.paragraph')).to_have_count(32)
+            expect(page.locator('#reader-percentage')).to_have_text('阅读进度 0%')
+            expect(page.get_by_role('progressbar',name='文章阅读进度')).to_be_visible()
             # Model an older installed extension: it listens on document in the bubble phase.
             # Opening a dialog must not allow the same mouse event to start a second analysis.
             page.evaluate('''() => {
@@ -95,6 +97,10 @@ def main():
             expect(page.locator('.notice')).to_have_count(0)
             page.locator('.entry-top button').first.click()
             expect(page.locator('.entry-top button').first).to_have_text('编辑收藏')
+            source=store.get_book('sample')
+            saved_word=wordbook.get('candid')
+            assert saved_word['source']['bookTitle']==source['fileName']
+            assert saved_word['source']['paragraph']==0
             page.locator('#sheet-close').click()
             expect(page.locator('#badge-0')).to_have_text('词 1 · 本段生词')
             assert vocab.call_count==1
@@ -102,6 +108,9 @@ def main():
             time.sleep(1.3)
             record=store.load_reading_history('sample')['0']
             assert record['paragraphIndex']>10,record
+            expect(page.locator('#reader-percentage')).not_to_have_text('阅读进度 0%')
+            assert abs(page.locator('#reader-progress-bar').evaluate('(node) => node.value')-record['progress'])<.01
+            assert page.locator('#reader-paragraph').inner_text()==f"第 {record['paragraphIndex']+1} / 32 段"
             stored_paragraph=record['paragraphIndex']
             phone=pages[1]
             phone.locator('.book-card .cover-link').click()
@@ -120,17 +129,36 @@ def main():
             phone.locator('#sheet-close').click()
             phone.get_by_role('link',name='生词本',exact=True).click()
             expect(phone.locator('.vocab-word')).to_have_text('candid')
+            expect(phone.locator('.word-source-heading')).to_contain_text('最近来源')
+            expect(phone.locator('.word-source-meta')).to_contain_text('第 1 段')
+            expect(phone.locator('.word-source-context')).to_contain_text(first_sentence)
+            expect(phone.locator('.word-source-link')).to_have_attribute('href','#/read/sample/0?paragraph=0')
             phone.locator('.entry-top button').first.click()
             phone.get_by_label('释义',exact=True).fill('手机上编辑的释义')
             phone.get_by_role('button',name='保存词条',exact=True).click()
             expect(phone.locator('.entry-sense')).to_have_text('手机上编辑的释义')
+            expect(phone.locator('.wordbook-list .word-source-link')).to_contain_text('Reading across devices')
+            wordbook.save(dict(word='legacy',sense='早期手动词条'))
+            phone.reload()
+            phone.get_by_role('searchbox',name='搜索个人生词本').fill('legacy')
+            expect(phone.locator('.word-source-empty')).to_contain_text('未记录文章来源')
+            phone.get_by_role('searchbox',name='搜索个人生词本').fill('Reading across devices')
+            expect(phone.locator('.vocab-word')).to_have_text('candid')
+            phone.locator('.wordbook-list .word-source-link').click()
+            expect(phone.locator('#para-0')).to_have_class('paragraph source-target')
+            expect(phone.locator('#reader-paragraph')).to_have_text('第 1 / 32 段')
+            gap=phone.evaluate("() => document.querySelector('#para-0').getBoundingClientRect().top-document.querySelector('.reader-toolbar').getBoundingClientRect().bottom")
+            assert abs(gap-8)<=2,gap
+            phone.evaluate('() => window.scrollTo(0, document.documentElement.scrollHeight)')
+            expect(phone.locator('#reader-percentage')).to_have_text('阅读进度 100%')
+            expect(phone.locator('#reader-paragraph')).to_have_text('第 32 / 32 段')
             phone.get_by_role('link',name='设置',exact=True).click()
             expect(phone.get_by_role('heading',name='阅读设置')).to_be_visible()
             width=phone.evaluate('() => ({scroll:document.documentElement.scrollWidth, width:innerWidth})')
             assert width['scroll']<=width['width'],width
             assert not errors,errors
             assert not requests,requests
-            print('BROWSER PASS: desktop + 390px phone; sentence double-click isolated from legacy extension, login, mark, vocab generation, collection, discussion, progress sync, edit, no overflow/errors')
+            print('BROWSER PASS: desktop + 390px phone; live progress, recent word source/search/jump, legacy source fallback, isolated double-click, login, mark, vocab, discussion, sync, edit, no overflow/errors')
             browser.close()
     finally:
         server.shutdown()

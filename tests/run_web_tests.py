@@ -119,6 +119,10 @@ class WebTests(unittest.TestCase):
             result=self.post('/books/sample/articles/0/lookup',dict(word='candid',paragraph=0))
             self.assertEqual(result.status_code,200,result.json)
             self.assertEqual(result.json['saved']['sense'],'坦率的')
+            source=result.json['saved']['source']
+            self.assertEqual(source['articleTitle'],self.article['title'])
+            self.assertEqual(source['context'],self.article['paragraphs'][0])
+            self.assertGreater(source['recordedAt'],0)
         with patch.object(core_dict,'lookup_many',return_value={}):
             overlay=self.client.get('/api/books/sample/articles/0/vocab').json
             self.assertFalse(overlay['generated'])
@@ -129,6 +133,30 @@ class WebTests(unittest.TestCase):
         delete=self.client.delete('/api/wordbook/candid',headers=self.headers)
         self.assertEqual(delete.status_code,200)
         self.assertFalse(wordbook.get('candid'))
+
+    def test_collection_records_recent_source_and_preserves_personal_edits(self):
+        url='/books/sample/articles/0/collect'
+        try:
+            result=self.post(url,dict(paragraph=0,entry=dict(word='candid',sense='本文义',source=dict(bookTitle='untrusted'))))
+            self.assertEqual(result.status_code,200,result.json)
+            self.assertEqual(result.json['word']['source']['bookTitle'],self.meta['fileName'])
+            self.post('/wordbook',dict(original='candid',word='candid',sense='个人释义',note='个人笔记'))
+            result=self.post(url,dict(paragraph=1,entry=dict(word='candid',sense='不覆盖个人释义')))
+            self.assertEqual(result.status_code,200,result.json)
+            record=result.json['word']
+            self.assertEqual(record['sense'],'个人释义')
+            self.assertEqual(record['note'],'个人笔记')
+            self.assertEqual(record['source']['paragraph'],1)
+            self.assertEqual(record['source']['context'],self.article['paragraphs'][1])
+            self.assertEqual(self.client.get('/api/wordbook?q=read%20books').json['words'][0]['word'],'candid')
+            for invalid in (-2,2,True):
+                self.assertEqual(self.post(url,dict(paragraph=invalid,entry=dict(word='candid'))).status_code,400)
+            result=self.post(url,dict(paragraph=-1,entry=dict(word='candid')))
+            self.assertEqual(result.json['word']['source']['context'],self.article['title'])
+            result=self.post(url,dict(entry=dict(word='candid')))
+            self.assertIsNone(result.json['word']['source']['paragraph'])
+        finally:
+            wordbook.delete('candid')
 
     def test_vocabulary_jobs_progress_and_cached_result(self):
         entered, release = threading.Event(), threading.Event()

@@ -116,6 +116,13 @@ def create_app(allowed_hosts=(), secure_cookie=False):
             abort(404, '找不到文章')
         return meta, art
 
+    def word_source(meta, art, paragraph):
+        if paragraph is not None and (type(paragraph) is not int or not -1 <= paragraph < len(art['paragraphs'])):
+            abort(400, '段落编号无效')
+        context = art['title'] if paragraph == -1 else art['paragraphs'][paragraph] if paragraph is not None else ''
+        return dict(bookId=meta['id'], bookTitle=meta['fileName'], articleIndex=art['index'],
+            articleTitle=art['title'], paragraph=paragraph, context=context[:800], recordedAt=int(time.time() * 1000))
+
     def payload():
         if not request.is_json:
             abort(415, '请求需要 JSON 格式')
@@ -317,10 +324,17 @@ def create_app(allowed_hosts=(), secure_cookie=False):
             abort(400, '段落编号无效')
         core_dict.ensure_db(background=False)
         result = core_dict.lookup(value) or {}
-        source = dict(bookId=book_id, bookTitle=meta['fileName'], articleIndex=index,
-            articleTitle=art['title'], paragraph=para, context=art['paragraphs'][para][:800])
-        saved = wordbook.remember_lookup(value, result, source)
+        saved = wordbook.remember_lookup(value, result, word_source(meta, art, para))
         return jsonify(result=result, saved=saved)
+
+    @app.post('/api/books/<book_id>/articles/<int:index>/collect')
+    def collect_word(book_id, index):
+        meta, art = article(book_id, index)
+        data = payload()
+        if not isinstance(data.get('entry'), dict):
+            abort(400, '词条无效')
+        saved = wordbook.remember_entry(data['entry'], word_source(meta, art, data.get('paragraph')))
+        return jsonify(word=saved)
 
     @app.get('/api/wordbook')
     def words():
