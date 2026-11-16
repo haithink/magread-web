@@ -267,6 +267,7 @@ async function readerPage(bookId,index,token,startParagraph=null) {
   const article=el('article',{class:'reader'});
   const progress=el('div',{class:'reader-position'},el('div',{class:'reader-position-labels'},
     el('strong',{id:'reader-percentage'},'阅读进度 0%'),el('span',{id:'reader-paragraph'},`第 1 / ${data.article.paragraphs.length} 段`),
+    el('span',{id:'reader-word-count'},`共 ${data.wordCount.toLocaleString()} 词`),
     el('span',{class:'reader-save-state',id:'reader-save-state'},'自动同步')),
     el('progress',{id:'reader-progress-bar',max:1,value:0,'aria-label':'文章阅读进度'}));
   const vocabButton=button('生成生词表',action(()=>openVocab(null)),'primary');vocabButton.id='vocab-button';
