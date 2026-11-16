@@ -87,6 +87,27 @@ class WebTests(unittest.TestCase):
         self.assertNotIn('SOURCE_SECRET', self.client.get('/api/library').text)
         self.assertEqual(self.client.get('/api/session').headers['X-Content-Type-Options'], 'nosniff')
 
+    def test_https_host_secure_cookie_without_breaking_local_login(self):
+        app = create_app(https_hosts=['READ.EXAMPLE.COM'])
+        try:
+            for base, secure in [('https://read.example.com', True), ('http://localhost', False)]:
+                with self.subTest(base=base):
+                    client = app.test_client()
+                    response = client.post('/api/login', json={'password':self.authcode}, base_url=base,
+                                           headers={'Origin':base})
+                    self.assertEqual(response.status_code, 200)
+                    cookie = response.headers['Set-Cookie']
+                    self.assertEqual('; Secure;' in cookie, secure)
+                    self.assertIn('; HttpOnly;', cookie)
+                    self.assertIn('SameSite=Strict', cookie)
+                    self.assertEqual(client.get('/api/library', base_url=base).status_code, 200)
+                    self.assertEqual(client.post('/api/logout', base_url=base, json={},
+                        headers={'Origin':base, 'X-CSRF-Token':response.json['csrf']}).status_code, 200)
+                    self.assertEqual(client.get('/api/library', base_url=base).status_code, 401)
+            self.assertEqual(app.test_client().get('/api/session', base_url='https://unknown.example.com').status_code,400)
+        finally:
+            app.extensions['jobs'].pool.shutdown(wait=True)
+
     def test_read_existing_cache_without_model_or_reparse(self):
         with patch.object(store, 'epub_parse', side_effect=AssertionError('Do not reparse cached source')):
             books = self.client.get('/api/library').json['books']

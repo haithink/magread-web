@@ -79,11 +79,23 @@ http://服务器局域网IP:8766
 
 最多两个后台任务并行，队列有界；同一本刊物的模型任务串行，页面显示进度。打开文章不会自动调用付费模型。服务重启后正在运行的任务会中断，已保存的分块结果可再次补缺，队列本身不跨重启恢复。
 
-后续可以通过 Cloudflare Tunnel 连接自有域名。以下仅为 HTTPS 隧道后的启动参数示例，不会创建隧道或修改 DNS：
+可以通过 Cloudflare Tunnel 连接自有域名。以下仅为 HTTPS 隧道后的启动参数示例，不会创建隧道或修改 DNS：
 
 ```bash
 python run_web.py --host 127.0.0.1 --allowed-host read.example.com --secure-cookie
 ```
+
+如果还要保留局域网 HTTP 登录，可改用 `python run_web.py --https-host read.example.com`：该域名自动加入白名单并使用 Secure 登录 Cookie，本机和局域网地址继续使用原来的 Cookie 设置。
+
+Windows 启动器可读取仓库外的 `%LOCALAPPDATA%\KanduWebRuntime\web-launch.json`，例如：
+
+```json
+{"httpsHosts": ["read.example.com"], "publicUrl": "https://read.example.com"}
+```
+
+修改配置后需重启 Web 进程。未配置此文件时仍使用原来的局域网模式。`tools/start_web.ps1 -NoBrowser` 仅启动后台 Web 服务，不打开浏览器或输出访问密码。
+
+对于已配置的本机 Cloudflare Tunnel，把官方 `cloudflared.exe` 与 `config.yml` 放在 `%LOCALAPPDATA%\KanduWebRuntime\cloudflared\`，隧道凭据文件继续保存在仓库外。配置中只映射阅读域名到 `http://127.0.0.1:8766`，最后添加 `http_status:404` 兜底规则。运行 `powershell -NoProfile -ExecutionPolicy Bypass -File tools/start_public_web.ps1` 启动服务、隧道并打开网页；添加 `-NoBrowser` 可用于 Windows 用户登录启动项，凭据与日志均不应放入源码。此脚本不会创建 Cloudflare 账号资源或安装系统服务。
 
 Web 登录密码、HttpOnly/SameSite 会话、CSRF、请求来源与访问主机名校验默认启用。浏览器使用纯文本节点显示用户和模型内容，不执行返回的 HTML。
 

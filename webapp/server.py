@@ -13,6 +13,7 @@ import time
 from urllib.parse import urlsplit
 
 from flask import Flask, abort, jsonify, request, send_file, session
+from flask.sessions import SecureCookieSessionInterface
 from werkzeug.exceptions import HTTPException
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -80,7 +81,13 @@ class Jobs:
             return {k: v for k, v in job.items() if k not in ('key', 'control')}
 
 
-def create_app(allowed_hosts=(), secure_cookie=False):
+class HostCookieSessionInterface(SecureCookieSessionInterface):
+    def get_cookie_secure(self, app):
+        hostname = urlsplit(request.host_url).hostname or ''
+        return super().get_cookie_secure(app) or hostname.lower() in app.config['HTTPS_HOSTS']
+
+
+def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=()):
     root = config.app_dir()
     auth_file = root / 'web-auth.json'
     if not auth_file.exists():
@@ -92,9 +99,12 @@ def create_app(allowed_hosts=(), secure_cookie=False):
     app.config.update(SECRET_KEY=auth['secret'], MAX_CONTENT_LENGTH=150 * 1024**2,
                       SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE='Strict',
                       SESSION_COOKIE_SECURE=secure_cookie, SESSION_COOKIE_NAME='kandu_web',
+                      HTTPS_HOSTS=frozenset(h.lower() for h in https_hosts),
                       PERMANENT_SESSION_LIFETIME=timedelta(days=30))
+    app.session_interface = HostCookieSessionInterface()
     hosts = {'localhost', '127.0.0.1', '::1', socket.gethostname().lower(), *[h.lower() for h in allowed_hosts]}
     hosts.update(r[4][0] for r in socket.getaddrinfo(socket.gethostname(), None))
+    hosts.update(app.config['HTTPS_HOSTS'])
     jobs = Jobs()
     app.extensions['jobs'] = jobs
     data_lock = threading.RLock()
