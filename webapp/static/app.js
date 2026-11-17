@@ -187,7 +187,11 @@ async function digestPage(bookId,token) {
   const data=await api('/books/'+encodeURIComponent(bookId));if(token!==state.route)return;
   const q=el('input',{class:'search',type:'search',placeholder:'搜索标题、摘要…','aria-label':'搜索文章'});
   let filter='all';const grid=el('div',{class:'article-grid'}),tabs=el('div',{class:'tabs'});
-  const counts=()=>Object.fromEntries(['all',...Object.keys(labels)].map(k=>[k,k==='all'?data.articles.length:data.articles.filter(a=>a.state===k).length]));
+  const duplicateCount=data.articles.filter(a=>a.earlierOccurrence).length;
+  const showDuplicates=el('input',{type:'checkbox',id:'show-duplicate-articles'});
+  const issueCount=el('span',{class:'count',id:'issue-article-count','aria-live':'polite'});
+  const visibleArticles=()=>data.articles.filter(a=>showDuplicates.checked||!a.earlierOccurrence);
+  const counts=articles=>Object.fromEntries(['all',...Object.keys(labels)].map(k=>[k,k==='all'?articles.length:articles.filter(a=>a.state===k).length]));
   const cards=new Map();
   const stateSelect=(a)=>{
     const select=el('select',{'aria-label':'文章标记'},...Object.entries(labels).map(([k,v])=>el('option',{value:k},v)));
@@ -203,6 +207,8 @@ async function digestPage(bookId,token) {
       el('div',{class:'card-top'},el('span',{},`ARTICLE ${String(a.index+1).padStart(2,'0')}`),el('span',{class:'state-pill'},labels[a.state])),
       el('a',{href:linkFor(bookId,a.index)},el('h2',{},a.titleEn),a.titleZh?el('h3',{},a.titleZh):null),
       el('p',{},a.summaryZh||'这篇文章尚未生成摘要，可以直接打开原文阅读。'),
+      a.earlierOccurrence?el('a',{class:'duplicate-source',href:linkFor(a.earlierOccurrence.bookId,a.earlierOccurrence.articleIndex)},
+        '更早收录于 '+a.earlierOccurrence.fileName.replace(/\.(epub|pdf)$/i,'')+' ↗'):null,
       el('div',{class:'card-bottom'},stateSelect(a),el('a',{href:linkFor(bookId,a.index)},a.history?`继续阅读 ${Math.round(a.history.progress*100)}% →`:'打开文章 →')));
     cards.set(a.index,card);
   }
@@ -210,16 +216,20 @@ async function digestPage(bookId,token) {
     const b=button(label,()=>{filter=key;render();});tabButtons.set(key,b);tabs.append(b);
   }
   function render(){
-    const c=counts();for(const [k,b]of tabButtons){b.textContent=`${k==='all'?'全部':labels[k]} ${c[k]}`;b.classList.toggle('active',k===filter);}
+    const articles=visibleArticles(),c=counts(articles);
+    issueCount.textContent=duplicateCount?`共 ${data.articles.length} 篇 · ${showDuplicates.checked?'包含 '+duplicateCount+' 篇重复文章':'已隐藏 '+duplicateCount+' 篇重复文章'}`:`${data.articles.length} 篇文章`;
+    for(const [k,b]of tabButtons){b.textContent=`${k==='all'?'全部':labels[k]} ${c[k]}`;b.classList.toggle('active',k===filter);}
     const terms=q.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
-    const matches=data.articles.filter(a=>(filter==='all'||a.state===filter)&&terms.every(t=>(a.titleEn+' '+a.titleZh+' '+a.summaryZh).toLowerCase().includes(t)));
-    grid.replaceChildren(...matches.map(a=>cards.get(a.index)));if(!matches.length)grid.append(empty('没有匹配的文章'));
+    const matches=articles.filter(a=>(filter==='all'||a.state===filter)&&terms.every(t=>(a.titleEn+' '+a.titleZh+' '+a.summaryZh).toLowerCase().includes(t)));
+    grid.replaceChildren(...matches.map(a=>cards.get(a.index)));
+    if(!matches.length)grid.append(!articles.length&&duplicateCount&&!showDuplicates.checked?
+      empty('本期文章均已在更早刊物出现','勾选“显示重复文章”可查看原目录，摘要和阅读记录仍保留。'):empty('没有匹配的文章'));
   }
-  q.oninput=render;
+  q.oninput=render;showDuplicates.onchange=render;
   view.replaceChildren(el('a',{href:'#/library',class:'back'},'← 我的书库'),
-    el('div',{class:'digest-head'},heading('ISSUE CONTENTS',data.fileName.replace(/\.(epub|pdf)$/i,''),`${data.articles.length} 篇文章`,[
+    el('div',{class:'digest-head'},heading('ISSUE CONTENTS',data.fileName.replace(/\.(epub|pdf)$/i,''),issueCount,[
       button('生成 / 补缺摘要',action(()=>runJob(`/books/${encodeURIComponent(bookId)}/generate-digest`,{},()=>{if(token===state.route)route();})),'primary')
-    ])),el('div',{class:'filters'},q),tabs,el('div',{class:'filters'}),grid);
+    ])),el('div',{class:'filters'},q,duplicateCount?el('label',{class:'duplicate-toggle'},showDuplicates,`显示重复文章（${duplicateCount}）`):null),tabs,el('div',{class:'filters'}),grid);
   render();
 }
 

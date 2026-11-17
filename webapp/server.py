@@ -23,6 +23,7 @@ from kandu import core_llm as llm, core_wordbook as wordbook, core_dict, core_di
 from webapp import __version__
 from webapp import reading_stats
 from webapp import word_meaning
+from webapp import article_duplicates
 
 STATIC = Path(__file__).parent / 'static'
 BOOK_ID = re.compile(r'[A-Za-z0-9._-]{1,220}\Z')
@@ -316,12 +317,15 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=()):
     def digest(book_id):
         meta = book(book_id)
         content = store.ensure_content(meta)
+        duplicates = article_duplicates.earlier_occurrences(meta, content['articles'])
         summaries = {a['index']: a for a in (store.load_digest(book_id) or {}).get('articles', [])}
         states, history = store.load_article_states(book_id), store.load_reading_history(book_id)
         items = [dict(index=a['index'], titleEn=a['title'], titleZh=summaries.get(a['index'], {}).get('titleZh', ''),
             summaryZh=summaries.get(a['index'], {}).get('summaryZh', ''),
-            state=states.get(str(a['index']), 'unread'), history=history.get(str(a['index']))) for a in content['articles']]
-        return jsonify(id=book_id, fileName=meta['fileName'], ext=meta['ext'], articles=items)
+            state=states.get(str(a['index']), 'unread'), history=history.get(str(a['index'])),
+            earlierOccurrence=duplicates.get(a['index'])) for a in content['articles']]
+        return jsonify(id=book_id, fileName=meta['fileName'], ext=meta['ext'], articles=items,
+                       duplicateCount=len(duplicates))
 
     @app.post('/api/books/<book_id>/state')
     def mark(book_id):

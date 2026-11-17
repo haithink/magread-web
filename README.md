@@ -8,12 +8,21 @@
 
 - EPUB/PDF 上传、封面与刊物分类、最近阅读及继续阅读。
 - 文章摘要与搜索，未读、已读、不感兴趣标记。
+- 文章目录默认隐藏更早刊物已收录的同标题文章，可展开重复文章并跳转到更早出处。
 - 全局已读清单、去重文章数和累计阅读词数，显示标题、词数、完成时间和所有出处，支持搜索及回到原文。
 - 正文阅读、字号调整、全文搜索、词数与阅读位置保存，工具栏实时显示百分比、进度条和段落位置。
 - 全文/逐段生词与短语、补缺生成，区分个人收藏与模型词表。
 - 就近选词工具条、查词自动收藏及 LLM 本文含义解释；个人生词本查询与编辑、句子讲解，展示最近来源、原文片段与本文用法，点击文章可回到来源段落。
 - 按文章保存多轮 AI 讨论，显示生成进度，支持停止讨论回答。
 - 粘贴完整模型配置 JSON，编辑已有模型的接口地址、模型名等配置，选择默认模型与已掌握的词汇级别；编辑时密钥留空保留原值。
+
+## 文章目录去重
+
+某篇文章已在书库中更早的刊物出现时，后一期的摘要目录默认隐藏该文章；按规范化英文原文标题匹配，忽略大小写、空白和常见排版标点差异，不依赖是否已读。目录显示隐藏数量，勾选「显示重复文章」可恢复完整目录，并通过卡片上的更早出处链接阅读。全部、未读、已读等计数和搜索随当前显示范围更新；切换开关和分类在浏览器本地完成。
+
+刊期以文件名中的 `YYYY.MM.DD`、`YYYY-MM-DD`、`YYYY_MM_DD` 或年月判断，只有年月时按当月 1 日处理。只比较严格更早的刊期，同日版本和日期不明的文件不互相隐藏。使用书库中已有正文或摘要索引识别标题，不为此重新解析其他刊物或调用模型；后续生成索引、替换缓存或移除旧刊后，重新打开目录会更新结果。同名但内容不同的文章也可能被隐藏，可展开查看。
+
+这只改变目录显示，原刊、文章编号、摘要、生词、阅读进度和标记全部保留。全文均重复时显示说明并保留展开入口；首页最近阅读、已读统计和原文章链接仍可访问。
 
 ## 段落生词与短语
 
@@ -138,11 +147,13 @@ Web 登录密码、HttpOnly/SameSite 会话、CSRF、请求来源与访问主机
 python -m pip install -r requirements-dev.txt
 python tests/run_web_tests.py
 python tests/run_reading_stats_tests.py
+python tests/run_article_duplicate_tests.py
 python tests/run_word_meaning_tests.py
 python tests/run_phrase_tests.py
 python tests/run_privacy_tests.py
 python -m playwright install chromium
 python tests/run_web_browser_tests.py
+python tests/run_article_duplicate_browser_tests.py
 python tests/run_lookup_browser_tests.py
 python tests/run_phrase_browser_tests.py
 python tools/check_public_files.py
