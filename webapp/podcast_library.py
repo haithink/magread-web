@@ -57,8 +57,9 @@ def directory(meta):
 
 
 def card(meta, entries, digests):
+    unread = sum(store.load_article_states(m['id']).get('0', 'unread') == 'unread' for m in entries)
     summaries = sum(any(a.get('index') == 0 and a.get('summaryZh') and
         not a['summaryZh'].startswith('（本篇摘要生成失败')
         for a in digests[m['id']].get('articles', [])) for m in entries)
-    return dict(meta, cover=True, articleCount=len(entries), summaryCount=summaries,
+    return dict(meta, cover=True, articleCount=len(entries), unreadCount=unread, summaryCount=summaries,
         totalArticleCount=len(entries), duplicateCount=0, articleCountKnown=True)

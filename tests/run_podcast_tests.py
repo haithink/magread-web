@@ -53,6 +53,7 @@ class PodcastTests(unittest.TestCase):
     def setUpClass(cls):
         WebTests.setUpClass()
         cls.app, cls.authcode = WebTests.app, WebTests.authcode
+        cls.config_password = WebTests.config_password
 
     @classmethod
     def tearDownClass(cls):
@@ -156,6 +157,7 @@ class PodcastTests(unittest.TestCase):
             self.assertEqual(len(cards), 1)
             series = cards[0]
             self.assertEqual((series['articleCount'],series['summaryCount']), (2,2))
+            self.assertEqual(series['unreadCount'], 2)
             directory = self.client.get('/api/books/'+series['id']).json
             self.assertEqual([a['episodeNumber'] for a in directory['articles']], [55,54])
             cover = self.client.get('/api/books/'+series['id']+'/cover')
@@ -201,6 +203,13 @@ class PodcastTests(unittest.TestCase):
             self.assertEqual(marked.status_code, 200)
             stats = self.client.get('/api/reading-stats').json
             self.assertIn(books[0]['title'], json.dumps(stats, ensure_ascii=False))
+            def unread_count():
+                return next(b for b in self.client.get('/api/library').json['books'] if b['id']==series['id'])['unreadCount']
+            self.assertEqual(unread_count(), 1)
+            self.assertEqual(self.post('/books/'+books[1]['id']+'/state', dict(articleIndex=0,state='uninterested')).status_code, 200)
+            self.assertEqual(unread_count(), 0)
+            self.assertEqual(self.post('/books/'+books[0]['id']+'/state', dict(articleIndex=0,state='unread')).status_code, 200)
+            self.assertEqual(unread_count(), 1)
 
     def test_series_reuses_learning_data_and_episode_identity_after_new_import(self):
         with patch.object(podcasts, 'fetch_html', side_effect=fake_fetch), patch.object(llm, 'conversation', side_effect=fake_model):

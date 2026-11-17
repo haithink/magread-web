@@ -30,10 +30,13 @@ class DuplicateTests(unittest.TestCase):
     def setUpClass(cls):
         WebTests.setUpClass()
         cls.app, cls.authcode = WebTests.app, WebTests.authcode
+        cls.config_password = WebTests.config_password
 
     @classmethod
     def tearDownClass(cls):
         WebTests.tearDownClass()
+
+    post = WebTests.post
 
     def setUp(self):
         WebTests.setUp(self)
@@ -73,6 +76,22 @@ class DuplicateTests(unittest.TestCase):
             visible = [a for a in directory['articles'] if not a['earlierOccurrence']]
             self.assertEqual(book['articleCount'], len(visible), ident)
             self.assertEqual(book['summaryCount'], len([a for a in visible if a['summaryZh']]), ident)
+            self.assertEqual(book['unreadCount'], len([a for a in visible if a['state']=='unread']), ident)
+
+    def test_home_unread_count_tracks_states_and_excludes_hidden_articles(self):
+        store.set_article_state('old', 0, 'read')
+        store.set_article_state('old', 1, 'uninterested')
+        self.assertEqual(self.library_books()['old']['unreadCount'], 1)
+        path = config.app_dir()/'cache/new/content.json'
+        before = path.read_bytes()
+        for state, expected in [('read', 0), ('uninterested', 0), ('unread', 1)]:
+            response = self.post('/books/new/state', dict(articleIndex=1, state=state))
+            self.assertEqual(response.status_code, 200)
+            book = self.library_books()['new']
+            visible = [a for a in self.get()['articles'] if not a['earlierOccurrence']]
+            self.assertEqual(book['unreadCount'], expected)
+            self.assertEqual(book['unreadCount'], sum(a['state']=='unread' for a in visible))
+        self.assertEqual(path.read_bytes(), before)
 
     def test_home_counts_indexed_articles_before_summary_generation_without_parsing(self):
         fresh, _ = publication('fresh', 'New_2026.12.02.epub', [self.articles[0]['title'],'A fresh article'], summarized=False)

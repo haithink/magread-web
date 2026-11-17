@@ -96,10 +96,12 @@ def library_counts(library, digests):
     def count(meta, titles, previous):
         visible = {index for key, index in titles if key not in previous}
         hidden = {index for key, index in titles if key in previous}
+        states = store.load_article_states(meta['id'])
+        unread = sum(states.get(str(index), 'unread') == 'unread' for index in visible)
         summaries = {entry['index'] for entry in digests.get(meta['id'], {}).get('articles', [])
                      if entry.get('index') in visible and entry.get('summaryZh')
                      and not entry['summaryZh'].startswith('（本篇摘要生成失败')}
-        result[meta['id']] = dict(articleCount=len(visible), summaryCount=len(summaries),
+        result[meta['id']] = dict(articleCount=len(visible), unreadCount=unread, summaryCount=len(summaries),
             totalArticleCount=len(visible | hidden), duplicateCount=len(hidden), articleCountKnown=bool(titles))
 
     for meta in library:

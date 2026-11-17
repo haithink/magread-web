@@ -161,11 +161,12 @@ async function library(token) {
         const cover=book.cover?el('img',{src:`/api/books/${encodeURIComponent(book.id)}/cover`,alt:book.title||book.fileName,loading:'lazy'}):isPodcast?
           el('span',{class:'podcast-cover'},el('small',{},name.replace(/ Podcast$/i,'').toUpperCase()),el('strong',{},'#'+book.episodeNumber),el('span',{},'PODCAST'),el('small',{},book.publishedAt||'TRANSCRIPT')):el('span',{class:'cover-placeholder'},name);
         const articleCount=book.articleCountKnown?`${book.articleCount} 篇文章`:'待解析文章';
+        const unreadCount=book.articleCountKnown?`未读 ${book.unreadCount} 篇`:null;
         const summaryCount=book.articleCountKnown&&book.articleCount===0?'本期均为重复文章':book.summaryCount?`${book.summaryCount} 篇已有摘要`:'待生成摘要';
         grid.append(el('article',{class:'book-card'},el('a',{class:'cover-link',href:`#/book/${encodeURIComponent(book.id)}`},cover,
           el('span',{class:'format-tag'},isPodcast?'PODCAST':book.ext.toUpperCase())),
           el('h3',{},el('a',{href:`#/book/${encodeURIComponent(book.id)}`},book.title||book.fileName.replace(/\.(epub|pdf)$/i,''))),
-          el('div',{class:'count'},book.available?`${articleCount} · ${summaryCount}`:'原文件暂不可用')));
+          el('div',{class:'count'},[articleCount,unreadCount,summaryCount,book.available?null:'原文件暂不可用'].filter(Boolean).join(' · '))));
       }
       result.append(el('section',{class:'library-section'},el('div',{class:'section-title'},el('h2',{},name),el('span',{class:'count'},`${books.length} 本`)),grid));
     }
