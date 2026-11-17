@@ -11,9 +11,15 @@
 - 全局已读清单、去重文章数和累计阅读词数，显示标题、词数、完成时间和所有出处，支持搜索及回到原文。
 - 正文阅读、字号调整、全文搜索、词数与阅读位置保存，工具栏实时显示百分比、进度条和段落位置。
 - 全文/逐段生词与短语、补缺生成，区分个人收藏与模型词表。
-- 查词自动收藏、个人生词本查询与编辑、句子讲解；展示最近收藏/查词来源及原文片段，点击文章可回到来源段落。
+- 就近选词工具条、查词自动收藏及 LLM 本文含义解释；个人生词本查询与编辑、句子讲解，展示最近来源、原文片段与本文用法，点击文章可回到来源段落。
 - 按文章保存多轮 AI 讨论，显示生成进度，支持停止讨论回答。
 - 粘贴完整模型配置 JSON，编辑已有模型的接口地址、模型名等配置，选择默认模型与已掌握的词汇级别；编辑时密钥留空保留原值。
+
+## 选词与本文含义
+
+用鼠标拖选正文单词或短语，或在手机上长按选词，操作工具条会出现在选中文字旁边，靠近屏幕边缘时自动避让。点击「查词并收藏」，先保存个人生词并显示可用的词典结果，随后通过默认 LLM 解释它在当前句子、段落中的含义、词性、搭配和句子译文。例如选中 `moon-bound` 中的 `bound`，模型会结合完整搭配理解目的地，而非罗列无关的“界限”等通用义项。
+
+本文含义在后台生成，界面显示接收进度。相同选中位置、语境和模型的结果会复用缓存；词典或个人释义可展开查看，未配置模型时仍可查词收藏，失败时可重试。解释随生词本最近来源保存，不覆盖手工修改的释义或笔记，也不改变阅读位置。只向配置的模型发送标题和有长度限制的相关上下文，不发送整本刊物。缓存和生词本均保存在仓库外的应用数据目录。
 
 ## 已读统计与 Chrome 阅读同步
 
@@ -124,9 +130,11 @@ Web 登录密码、HttpOnly/SameSite 会话、CSRF、请求来源与访问主机
 python -m pip install -r requirements-dev.txt
 python tests/run_web_tests.py
 python tests/run_reading_stats_tests.py
+python tests/run_word_meaning_tests.py
 python tests/run_privacy_tests.py
 python -m playwright install chromium
 python tests/run_web_browser_tests.py
+python tests/run_lookup_browser_tests.py
 python tools/check_public_files.py
 ```
 

@@ -22,6 +22,7 @@ from kandu import core_config as config, core_parsers as store, core_gen as gen
 from kandu import core_llm as llm, core_wordbook as wordbook, core_dict, core_discussion as discussion
 from webapp import __version__
 from webapp import reading_stats
+from webapp import word_meaning
 
 STATIC = Path(__file__).parent / 'static'
 BOOK_ID = re.compile(r'[A-Za-z0-9._-]{1,220}\Z')
@@ -381,10 +382,38 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=()):
         para = data.get('paragraph', 0)
         if type(para) is not int or not 0 <= para < len(art['paragraphs']):
             abort(400, '段落编号无效')
-        core_dict.ensure_db(background=False)
+        context = word_meaning.selection(art, para, value, data.get('start'))
+        core_dict.ensure_db(background=True)
         result = core_dict.lookup(value) or {}
-        saved = wordbook.remember_lookup(value, result, word_source(meta, art, para))
-        return jsonify(result=result, saved=saved)
+        source = dict(word_source(meta, art, para), selectedWord=value, selectedStart=data.get('start'))
+        saved = wordbook.remember_lookup(value, result, source)
+        cfg = config.get_llm(config.load_settings())
+        meaning = word_meaning.cached(book_id, context, cfg)
+        if meaning:
+            saved = wordbook.attach_context(saved['word'], meaning, saved['source']) or saved
+        return jsonify(result=result, saved=saved, contextMeaning=meaning, canExplain=llm.is_complete(cfg))
+
+    @app.post('/api/books/<book_id>/articles/<int:index>/lookup-context')
+    def lookup_context(book_id, index):
+        _, art = article(book_id, index)
+        data = payload()
+        context = word_meaning.selection(art, data.get('paragraph'), data.get('word'), data.get('start'))
+        cfg = model(data)
+        record = wordbook.get(data.get('savedWord') or context['word'])
+        source = record['source'] if record else None
+        # Only attach to the lookup that actually requested this occurrence.
+        if source and (source.get('bookId') != book_id or source.get('articleIndex') != index or source.get('paragraph') != data['paragraph']):
+            source = None
+        if record and context['word'] not in [record['word'], *record['aliases']]:
+            source = None
+        def work(update, control):
+            meaning = word_meaning.explain(book_id, context, cfg, update, control)
+            saved = None
+            if source is not None:
+                with data_lock:
+                    saved = wordbook.attach_context(record['word'], meaning, source)
+            return dict(meaning=meaning, saved=saved)
+        return accepted(jobs.submit(('word-meaning', book_id, word_meaning.cache_key(context, cfg)), work))
 
     @app.post('/api/books/<book_id>/articles/<int:index>/collect')
     def collect_word(book_id, index):

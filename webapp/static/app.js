@@ -262,13 +262,39 @@ function selectedQuote() {
   const end=selection.focusNode?.parentElement?.closest('.paragraph');
   if(!node||node!==end)return null;
   const quote=selection.toString().trim();if(!quote||quote.length>5000)return null;
-  return {quote,paragraph:Number(node.dataset.index)};
+  const range=selection.getRangeAt(0),text=$('p',node);
+  if(!text.contains(range.startContainer)||!text.contains(range.endContainer))return null;
+  const prefix=range.cloneRange();prefix.selectNodeContents(text);prefix.setEnd(range.startContainer,range.startOffset);
+  const leading=selection.toString().match(/^\s*/)[0];
+  return {quote,paragraph:Number(node.dataset.index),start:[...prefix.toString()].length+[...leading].length};
 }
 function selectionBar(reader) {
-  const selection=selectedQuote();if(!selection)return;
+  if($('#sheet').open)return;
+  const selection=selectedQuote(),bar=$('#selection-tools');
+  if(!selection){bar.hidden=true;state.selection=null;reader.selectionRange=null;return;}
   state.selection=selection;
-  const bar=$('#selection-tools');bar.hidden=false;
+  reader.selectionRange=window.getSelection().getRangeAt(0).cloneRange();
+  bar.hidden=false;
   $('span',bar).textContent=selection.quote;
+  positionSelectionBar(reader);
+}
+function positionSelectionBar(reader) {
+  const bar=$('#selection-tools');if(!bar||bar.hidden||!reader.selectionRange||$('#sheet').open)return;
+  const viewport=window.visualViewport;
+  const left=viewport?.offsetLeft||0,top=viewport?.offsetTop||0;
+  const width=viewport?.width||innerWidth,height=viewport?.height||innerHeight,margin=10;
+  const toolbarBottom=$('.reader-toolbar')?.getBoundingClientRect().bottom||top;
+  const rects=[...reader.selectionRange.getClientRects()].filter(r=>r.width&&r.height&&r.bottom>Math.max(top,toolbarBottom)&&r.top<top+height);
+  if(!rects.length){bar.hidden=true;return;}
+  const selection=window.getSelection(),range=reader.selectionRange;
+  const forward=selection?.anchorNode===range.startContainer&&selection?.anchorOffset===range.startOffset;
+  const anchor=forward?rects.at(-1):rects[0];
+  bar.style.maxWidth=Math.max(0,width-margin*2)+'px';
+  const size=bar.getBoundingClientRect();
+  let y=anchor.bottom+9;
+  if(y+size.height>top+height-margin)y=anchor.top-size.height-9;
+  const x=Math.max(left+margin,Math.min(anchor.left+anchor.width/2-size.width/2,left+width-size.width-margin));
+  bar.style.left=x+'px';bar.style.top=Math.max(top+margin,Math.min(y,top+height-size.height-margin))+'px';
 }
 async function readerPage(bookId,index,token,startParagraph=null) {
   const data=await api(`/books/${encodeURIComponent(bookId)}/articles/${index}`);if(token!==state.route)return;
@@ -293,9 +319,10 @@ async function readerPage(bookId,index,token,startParagraph=null) {
     button('与 AI 讨论',action(()=>discussionSheet(reader))),button('查找',()=>{findRow.hidden=!findRow.hidden;if(!findRow.hidden)find.focus();}),
     el('span',{class:'grow'}),button('A−',()=>resizeReader(reader,-1)),button('A+',()=>resizeReader(reader,1)),
     el('a',{href:`/api/books/${encodeURIComponent(bookId)}/file`,target:'_blank',rel:'noopener'},data.ext==='pdf'?'原版 PDF ↗':'下载 EPUB ↗'),progress);
-  const selection=el('div',{class:'selection-tools',id:'selection-tools',hidden:true},el('span',{}),
+  const selection=el('div',{class:'selection-tools',id:'selection-tools',hidden:true,role:'toolbar','aria-label':'选中文字操作',
+    onpointerdown:event=>event.preventDefault()},el('span',{}),
     button('查词并收藏',action(()=>lookupSelection(reader))),button('句子讲解',action(()=>analyzeSelection(reader))),
-    button('引用提问',action(()=>discussionSheet(reader,state.selection))),button('×',()=>selection.hidden=true));
+    button('引用提问',action(()=>discussionSheet(reader,state.selection))),button('×',()=>{selection.hidden=true;reader.selectionRange=null;}));
   const body=el('div',{class:'reader-body',id:'reader-body'});
   body.style.setProperty('--reading-size',reader.fontSize+'px');
   data.article.paragraphs.forEach((text,i)=>{
@@ -320,6 +347,9 @@ async function readerPage(bookId,index,token,startParagraph=null) {
     data.summaryZh?el('details',{class:'reader-summary'},el('summary',{},'文章摘要'),el('p',{},data.summaryZh)):null),selection,body);
   view.replaceChildren(article);window.scrollTo(0,0);
   document.addEventListener('selectionchange',reader.selectionHandler=()=>{if(state.reader===reader)selectionBar(reader);});
+  window.addEventListener('resize',reader.selectionResize=()=>positionSelectionBar(reader));
+  window.visualViewport?.addEventListener('resize',reader.selectionResize);
+  window.visualViewport?.addEventListener('scroll',reader.selectionResize);
   find.oninput=()=>findArticle(reader,find.value);
   const explicitPosition=Number.isInteger(startParagraph)&&startParagraph>=-1&&startParagraph<data.article.paragraphs.length;
   const paragraph=explicitPosition?startParagraph:data.history&&!data.history.atStart?Math.min(data.history.paragraphIndex,data.article.paragraphs.length-1):null;
@@ -332,7 +362,7 @@ async function readerPage(bookId,index,token,startParagraph=null) {
   updateReaderProgress(reader);
   readerScroll=()=>{
     if(state.reader!==reader)return;
-    if(!progressFrame)progressFrame=requestAnimationFrame(()=>{progressFrame=null;updateReaderProgress(reader);});
+    if(!progressFrame)progressFrame=requestAnimationFrame(()=>{progressFrame=null;updateReaderProgress(reader);positionSelectionBar(reader);});
     progressStatus(reader,'阅读中');clearTimeout(progressTimer);progressTimer=setTimeout(()=>saveProgress(),850);
   };
   window.addEventListener('scroll',readerScroll,{passive:true});
@@ -376,7 +406,8 @@ function sourceNode(source) {
   return el('div',{class:'word-source'},el('div',{class:'word-source-heading'},el('span',{},'最近来源'),
     when?el('time',{datetime:when.toISOString()},when.toLocaleString('zh-CN',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'})):null),
     heading,el('div',{class:'word-source-meta'},[source.bookTitle,location].filter(Boolean).join(' · ')),
-    source.context?el('p',{class:'word-source-context',title:source.context},source.context):null);
+    source.context?el('p',{class:'word-source-context',title:source.context},source.context):null,
+    source.contextMeaning?contextMeaningNode(source.contextMeaning,true):null);
 }
 function entryNode(entry,onSave,source=null) {
   const collect=button(entry.inWordbook?'编辑收藏':'＋ 加入生词本',action(async()=>{
@@ -425,10 +456,43 @@ async function vocabSheet(reader,paragraph) {
   }search.oninput=render;render();showSheet(paragraph===null?'本篇生词与短语':`第 ${paragraph+1} 段 · 生词与短语`,body);
 }
 async function lookupSelection(reader) {
-  const chosen=state.selection;if(!chosen)return;
-  const response=await api(baseFor(reader)+'/lookup',{method:'POST',data:{word:chosen.quote,paragraph:chosen.paragraph}});
-  showSheet('查词 · 已加入个人生词本',el('div',{},entryNode({...response.saved,inWordbook:true,inText:reader.article.paragraphs[chosen.paragraph],senseSource:'wordbook'}),sourceNode(response.saved.source)));
-  await loadVocab(reader);
+  const chosen={...state.selection};if(!chosen.quote)return;
+  const output=el('div',{},el('p',{class:'muted'},'正在查词…'));
+  const sheet=showSheet('查词 · 本文含义',output);
+  $('#selection-tools').hidden=true;
+  const request={word:chosen.quote,paragraph:chosen.paragraph,start:chosen.start};
+  let response;
+  try{response=await api(baseFor(reader)+'/lookup',{method:'POST',data:request});}
+  catch(error){if(sheet===state.sheet)output.replaceChildren(el('p',{class:'error'},error.message));return;}
+  if(sheet!==state.sheet)return;
+  const context=el('section',{class:'lookup-context','aria-live':'polite'});
+  const details=el('details',{class:'lookup-dictionary'},el('summary',{},'词典 / 个人释义 · 已加入个人生词本'),
+    entryNode({...response.saved,inWordbook:true,senseSource:'wordbook'}));
+  output.replaceChildren(el('div',{class:'lookup-word'},el('strong',{},chosen.quote),el('span',{class:'phonetic'},response.saved.phonetic||'')),
+    context,details,sourceNode({...response.saved.source,contextMeaning:null}));
+  const refreshVocab=()=>{if(state.reader===reader)return loadVocab(reader);};
+  const explain=async()=>{
+    context.replaceChildren(el('p',{class:'muted'},'AI 正在结合当前句子与段落解释…'));
+    try {
+      await runJob(baseFor(reader)+'/lookup-context',{...request,savedWord:response.saved.word},async job=>{
+        if(sheet!==state.sheet)return;
+        if(job.state==='done'){context.replaceChildren(contextMeaningNode(job.result.meaning));await refreshVocab();}
+        else showFailure(job.error||'本文解释未完成');
+      },job=>{if(sheet===state.sheet&&job.state!=='done'&&$('p.muted',context))$('p.muted',context).textContent=job.status;});
+    }catch(error){if(sheet===state.sheet)showFailure(error.message);}
+  };
+  const showFailure=message=>{details.open=true;context.replaceChildren(el('p',{class:'muted'},'本文含义暂未生成：'+message),button('重试本文解释',action(explain)));};
+  if(response.contextMeaning)context.append(contextMeaningNode(response.contextMeaning));
+  else if(response.canExplain)await explain();
+  else {details.open=true;context.append(el('p',{class:'muted'},'配置 LLM 后，可结合本文语境解释词义。'),el('a',{href:'#/settings'},'前往设置 →'));}
+  await refreshVocab();
+}
+function contextMeaningNode(meaning,compact=false) {
+  return el('section',{class:'context-meaning'+(compact?' compact':'')},
+    el('div',{class:'context-meaning-heading'},el('span',{},'AI · 本文含义'),meaning.pos?el('small',{},meaning.pos):null),
+    el('p',{class:'context-sense'},meaning.sense),el('p',{class:'context-explanation'},meaning.explanation),
+    !compact&&meaning.sentence?el('p',{class:'quote'},meaning.sentence):null,
+    !compact&&meaning.translation?el('p',{class:'context-translation'},meaning.translation):null);
 }
 async function analyzeSelection(reader) {
   const chosen={...state.selection};if(!chosen.quote)return;
@@ -608,7 +672,10 @@ function editModel(initial) {
 
 async function route() {
   if(!state.csrf){showLogin();return;}
-  if(state.reader){await saveProgress(true);document.removeEventListener('selectionchange',state.reader.selectionHandler);}
+  if(state.reader){await saveProgress(true);document.removeEventListener('selectionchange',state.reader.selectionHandler);
+    window.removeEventListener('resize',state.reader.selectionResize);
+    window.visualViewport?.removeEventListener('resize',state.reader.selectionResize);
+    window.visualViewport?.removeEventListener('scroll',state.reader.selectionResize);}
   clearTimeout(progressTimer);cancelAnimationFrame(progressFrame);progressFrame=null;if(readerScroll)window.removeEventListener('scroll',readerScroll);readerScroll=null;
   state.reader=null;state.selection=null;
   if($('#sheet').open)$('#sheet').close();

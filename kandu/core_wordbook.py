@@ -120,6 +120,22 @@ def delete(word):
         return db.execute('DELETE FROM words WHERE word=?', (normalize(word),)).rowcount > 0
 
 
+def attach_context(word, meaning, source):
+    """Save an occurrence's explanation without overwriting edits or reviving deleted words."""
+    with connection() as db:
+        db.execute('BEGIN IMMEDIATE')
+        row = db.execute('SELECT * FROM words WHERE word=?', (normalize(word),)).fetchone()
+        if row is None:
+            return None
+        record = _record(row)
+        # A different lookup or edit may have occurred while the model ran.
+        if record['source'] != source:
+            return record
+        record['source'] = dict(source, contextMeaning=meaning)
+        _write(db, record)
+    return get(word)
+
+
 def remember_entry(entry, source):
     """收藏生成的词条或短语；保留本文义，不请求词典或模型，不覆盖个人编辑。"""
     raw = normalize(entry.get('word'))
