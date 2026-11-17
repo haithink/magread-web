@@ -202,7 +202,7 @@ async function podcastSheet() {
     start.disabled=running;
     body.append(el('section',{class:'podcast-source'},el('h3',{},source.name),
       el('a',{href:source.url,target:'_blank',rel:'noopener noreferrer',class:'duplicate-source'},'官方网站 ↗'),
-      el('p',{class:'count'},'只保存文字，不下载音频、视频或封面。长篇摘要采用覆盖全文的分段摘录。'),
+      el('p',{class:'count'},'保存文字并在本地生成简洁封面。长篇摘要采用覆盖全文的分段摘录。'),
       status,progress,failures,el('div',{class:'row'},start,stop)));
     if(running&&source.jobId)watchJob(source.jobId,done,render);
     render({status:source.status.status,result:source.status});

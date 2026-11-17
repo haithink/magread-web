@@ -7,6 +7,8 @@ import shutil
 import unittest
 from unittest.mock import patch
 import zipfile
+from io import BytesIO
+from PIL import Image
 
 from webapp import podcasts
 
@@ -153,6 +155,13 @@ class PodcastTests(unittest.TestCase):
                 self.assertEqual(book['publication'], 'Lex Fridman Podcast')
                 self.assertEqual(book['articleCount'], 1)
                 self.assertEqual(book['summaryCount'], 1)
+                self.assertTrue(book['cover'])
+                cover = self.client.get('/api/books/'+book['id']+'/cover')
+                self.assertEqual(cover.status_code, 200)
+                self.assertEqual(cover.mimetype, 'image/jpeg')
+                with Image.open(BytesIO(cover.data)) as image:
+                    self.assertEqual(image.size, (480,640))
+                cover.close()
                 self.assertNotIn('path', book)
                 article = self.client.get('/api/books/'+book['id']).json
                 self.assertIn('sourceUrl', article)
@@ -161,9 +170,21 @@ class PodcastTests(unittest.TestCase):
                 saved = self.post('/books/'+book['id']+'/articles/0/progress', dict(paragraphIndex=3, paragraphOffset=0))
                 self.assertEqual(saved.status_code, 200)
             network.reset_mock(); model.reset_mock()
+            first_cover = store.cover_file(books[0]['id'])
+            original_cover_stat = first_cover.stat()
             repeated = self.import_fake()
             self.assertEqual(repeated['result']['imported'], 0)
             self.assertEqual(repeated['result']['existing'], 2)
+            self.assertEqual(model.call_count, 0)
+            self.assertEqual(network.call_count, 1)
+            self.assertEqual(first_cover.stat().st_mtime_ns, original_cover_stat.st_mtime_ns)
+            # Existing installations get missing covers through the ordinary cover endpoint.
+            first_cover.unlink()
+            self.assertTrue(next(b for b in self.client.get('/api/library').json['books'] if b['id']==books[0]['id'])['cover'])
+            regenerated = self.client.get('/api/books/'+books[0]['id']+'/cover')
+            self.assertEqual(regenerated.status_code, 200)
+            regenerated.close()
+            self.assertTrue(first_cover.is_file())
             self.assertEqual(model.call_count, 0)
             self.assertEqual(network.call_count, 1)
             self.assertEqual(len(store.load_library()), 3)

@@ -25,6 +25,7 @@ from webapp import reading_stats
 from webapp import word_meaning
 from webapp import article_duplicates
 from webapp import podcasts
+from webapp import podcast_covers
 
 STATIC = Path(__file__).parent / 'static'
 BOOK_ID = re.compile(r'[A-Za-z0-9._-]{1,220}\Z')
@@ -268,7 +269,8 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=()):
                 title=meta.get('title', ''), sourceType=meta.get('sourceType', ''),
                 episodeNumber=meta.get('episodeNumber', 0), publishedAt=meta.get('publishedAt', ''),
                 **counts[meta['id']],
-                cover=store.has_cover(meta['id']), available=Path(meta['path']).is_file()))
+                cover=store.has_cover(meta['id']) or meta.get('sourceType') == 'podcast',
+                available=Path(meta['path']).is_file()))
             for idx, record in store.load_reading_history(meta['id']).items():
                 recent.append(dict(record, bookId=meta['id'], articleIndex=int(idx), bookTitle=meta.get('title') or meta['fileName']))
         recent.sort(key=lambda r: r['lastReadAt'], reverse=True)
@@ -341,6 +343,8 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=()):
     @app.get('/api/books/<book_id>/cover')
     def cover(book_id):
         meta = book(book_id)
+        if meta.get('sourceType') == 'podcast':
+            podcast_covers.ensure_cover(meta)
         path = store.cover_file(meta['id'])
         if not path.is_file():
             abort(404)
