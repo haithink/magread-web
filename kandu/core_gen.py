@@ -8,7 +8,7 @@ from . import core_config as cfgmod
 from . import core_llm as llm
 from . import core_prompts as prompts
 from . import core_parsers as store
-from .core_vocab_rules import contextual_words, is_basic_contraction, normalize_apostrophes
+from .core_vocab_rules import contextual_words, is_basic_contraction, normalize_apostrophes, phrase_candidates
 
 LEVEL_LABEL = {"cet4": "大学英语四级 CET-4", "cet6": "大学英语六级 CET-6", "toefl": "托福词汇 TOEFL", "gre": " GRE 词汇"}
 
@@ -159,6 +159,7 @@ def candidates(paragraph_texts, dict_set, lexicon=None):
 
 
 VOCAB_COVERAGE_VERSION = 2
+PHRASE_COVERAGE_VERSION = 1
 
 
 def _vocab_lexicon(units):
@@ -246,11 +247,51 @@ def vocab_context_pending(vocab):
         bool(entry.get("contextPending")) for section in vocab.get("paragraphs", []) for entry in section["entries"])
 
 
+def _backfill_phrase_section(section, text, required):
+    section = dict(section, entries=[dict(entry) for entry in section.get("entries", [])])
+    for word, hit in required.items():
+        # 模型可能返回原形；不再重复添加 papered over / paper over 两条。
+        if any(_norm_text(entry["word"]) in {word, hit["lemma"]} for entry in section["entries"]):
+            continue
+        section["entries"].append(dict(word=word, phonetic="", pos="phr.", sense=hit["translation"],
+            root="", term=False, inText=_vocab_context(word, text, {}),
+            senseSource="phrase_rule", contextPending=True))
+    return section
+
+
+def audit_phrase_coverage(vocab, article):
+    """纯本地补齐已生成段落的明确短语；读取旧词表不建词典、不调用模型、不写缓存。"""
+    result = vocab_normalize(vocab, article)
+    checked = set(result.get("phraseProcessedParagraphs", [])) if (
+        result.get("phraseCoverageVersion") == PHRASE_COVERAGE_VERSION) else set()
+    processed = set(result.get("processedParagraphs", [])) | checked
+    sections = {p["index"]: p for p in result.get("paragraphs", [])}
+    result = dict(result)
+    for idx, text in [(-1, article["title"]), *enumerate(article["paragraphs"])]:
+        if idx not in processed:
+            continue
+        required = phrase_candidates(text)
+        if not required:
+            continue
+        section = ({"index": -1, "entries": result.get("titleEntries", [])} if idx == -1 else
+                   sections.get(idx, {"index": idx, "startWords": text[:30], "entries": []}))
+        section = _backfill_phrase_section(section, text, required)
+        if any(is_phrase(entry) and entry.get("contextPending") for entry in section["entries"]):
+            checked.discard(idx)
+        if idx == -1:
+            result["titleEntries"] = section["entries"]
+        else:
+            sections[idx] = section
+    result.update(paragraphs=sorted(sections.values(), key=lambda p: p["index"]),
+                  phraseProcessedParagraphs=sorted(checked), phraseCoverageVersion=PHRASE_COVERAGE_VERSION)
+    return vocab_normalize(result, article)
+
+
 def audit_vocab_coverage(vocab, article, level):
     """离线补齐旧缓存遗漏，不调用模型，也不把尚未生成的段落标成完成。"""
     from . import core_dict
 
-    vocab = _clean_vocab_contractions(vocab)
+    vocab = audit_phrase_coverage(vocab, article)
     if vocab.get("coverageVersion") == VOCAB_COVERAGE_VERSION:
         return vocab
     core_dict.ensure_db(background=False)
@@ -614,7 +655,7 @@ def generate_vocab(meta, article, level, cfg, on_progress=None, on_chars=None, l
     started = time.perf_counter()
     existing = store.load_vocab(meta["id"], article["index"], level) or {}
     if existing:
-        audited = audit_vocab_coverage(existing, article, level)
+        audited = audit_phrase_coverage(existing, article) if phrases_only else audit_vocab_coverage(existing, article, level)
         if audited != existing:
             store.save_vocab(meta["id"], audited)
         existing = audited
@@ -626,24 +667,29 @@ def generate_vocab(meta, article, level, cfg, on_progress=None, on_chars=None, l
                      for idx, section in old_sections.items()}
     units = [(-1, article["title"]), *enumerate(article["paragraphs"])]
     if phrases_only:
+        # 点击“补充短语”是明确复查请求；旧版把普通词表也标成已检查，不能据此直接跳过。
         units = [(idx, text) for idx, text in units
-                 if idx not in phrase_processed and (only_para is None or idx == only_para)]
+                 if only_para is None or idx == only_para]
     else:
         units = [(idx, text) for idx, text in units if idx not in processed or (enrich and pending_words.get(idx))]
     if not units:
         return vocab_normalize(existing, article)
 
     from . import core_dict
-    cfgmod.ensure_wordlists()
-    dict_set = cfgmod.wordset(level)
-    core_dict.ensure_db(background=False)
-    lexicon = _vocab_lexicon(units)
+    if phrases_only:
+        dict_set, lexicon = set(), {}
+    else:
+        cfgmod.ensure_wordlists()
+        dict_set = cfgmod.wordset(level)
+        core_dict.ensure_db(background=False)
+        lexicon = _vocab_lexicon(units)
     cand = {idx: ([] if phrases_only else candidates([text.replace("’", "'")], dict_set, lexicon))
             for idx, text in units}
     for idx in cand:
         if enrich and idx in processed:
             cand[idx] = pending_words[idx]
     required = {idx: ({} if phrases_only else _required_candidates(text, cand[idx], lexicon)) for idx, text in units}
+    phrase_required = {idx: phrase_candidates(text) for idx, text in units}
 
     rotation = [dict(cfg)]
     for p in llm_rotation or []:
@@ -703,10 +749,9 @@ def generate_vocab(meta, article, level, cfg, on_progress=None, on_chars=None, l
                 break
             name = config.get("name", "?")
             local_words = {w for idx, _ in remaining for w in cand[idx] if (lexicon.get(w) or {}).get("phonetic")}
-            user = (f"文章标题：{article['title'][:80]}\n" + "\n\n".join(
-                f"### 段落 {idx}\n{text}" for idx, text in remaining)) if phrases_only else prompts.vocab_user(
-                    article["title"], -1, remaining, cand, local_words, required)
-            candidate_count = sum(len(cand[idx]) for idx, _ in remaining)
+            user = prompts.vocab_user(article["title"], -1, remaining, cand, local_words, required,
+                                      phrases=phrase_required, phrases_only=phrases_only)
+            candidate_count = sum(len(cand[idx]) + len(phrase_required[idx]) for idx, _ in remaining)
             budget = min(8192, max(2048, 512 + candidate_count * 110
                                   + sum(len(text) for _, text in remaining) // 3))
             request_cfg = dict(config)
@@ -745,6 +790,7 @@ def generate_vocab(meta, article, level, cfg, on_progress=None, on_chars=None, l
                  "paragraphs": sorted(merged_sections.values(), key=lambda p: p["index"]),
                  "idioms": list({i["word"].lower(): i for i in merged_idioms}.values()),
                  "processedParagraphs": sorted(processed), "phraseProcessedParagraphs": sorted(phrase_processed),
+                 "phraseCoverageVersion": PHRASE_COVERAGE_VERSION,
                  failure_key: chunk_failures, error_key: chunk_errors,
                  ("failedPhraseChunks" if phrases_only else "failedChunks"): failed_chunks,
                  "censorHint": censor_hit,
@@ -764,11 +810,16 @@ def generate_vocab(meta, article, level, cfg, on_progress=None, on_chars=None, l
             censor_hit |= censor
             if sections:
                 for idx, section in sections.items():
-                    section["entries"] = _merge_vocab_entries(old_sections.get(idx, {}).get("entries", []), section["entries"])
+                    generated_words = {e["word"] for e in section["entries"]}
+                    old_entries = [e for e in old_sections.get(idx, {}).get("entries", []) if not (
+                        e.get("senseSource") == "phrase_rule" and e["word"] in phrase_required[idx] and
+                        phrase_required[idx][e["word"]]["lemma"] in generated_words)]
+                    section["entries"] = _merge_vocab_entries(old_entries, section["entries"])
                     sections[idx] = _backfill_vocab_section(section, dict(units)[idx], required[idx], lexicon)
+                    sections[idx] = _backfill_phrase_section(sections[idx], dict(units)[idx], phrase_required[idx])
                 entries = [e for section in sections.values() for e in section["entries"]]
                 # 原形/音标查询用一条 SQLite 连接，本地数据优先，未收录词保留模型音标。
-                phonetics = core_dict.lookup_many([e["word"] for e in entries])
+                phonetics = {} if phrases_only else core_dict.lookup_many([e["word"] for e in entries])
                 for entry in entries:
                     if (phonetics.get(entry["word"]) or {}).get("phonetic"):
                         entry["phonetic"] = phonetics[entry["word"]]["phonetic"]
@@ -783,7 +834,11 @@ def generate_vocab(meta, article, level, cfg, on_progress=None, on_chars=None, l
                         merged_sections[idx] = section
                 if not phrases_only:
                     processed.update(sections)
-                phrase_processed.update(sections)
+                for idx, section in sections.items():
+                    if any(is_phrase(e) and e.get("contextPending") for e in section["entries"]):
+                        phrase_processed.discard(idx)
+                    elif phrases_only:
+                        phrase_processed.add(idx)
                 finished = phrase_processed if phrases_only else processed
                 chunk_failures = {k: v for k, v in chunk_failures.items()
                                   if not all(int(i) in finished for i in k.split(","))}
@@ -810,7 +865,9 @@ def is_phrase(entry):
 
 
 def phrase_pending(vocab, article, only_para=None):
-    checked = set((vocab or {}).get("phraseProcessedParagraphs", []))
+    vocab = vocab or {}
+    checked = set(vocab.get("phraseProcessedParagraphs", [])) if (
+        vocab.get("phraseCoverageVersion") == PHRASE_COVERAGE_VERSION) else set()
     indices = [-1, *range(len(article["paragraphs"]))] if only_para is None else [only_para]
     return sum(idx not in checked for idx in indices)
 

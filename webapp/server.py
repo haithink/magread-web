@@ -370,7 +370,7 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=()):
         _, art = article(book_id, index)
         level = config.load_settings()['vocabLevel']
         cached = store.load_vocab(book_id, index, level)
-        vocab = wordbook.overlay(gen.vocab_normalize(cached, art) if cached else None, art, level)
+        vocab = wordbook.overlay(gen.audit_phrase_coverage(cached, art) if cached else None, art, level)
         missing = [i for i in range(len(art['paragraphs'])) if i not in (cached or {}).get('processedParagraphs', [])]
         return jsonify(vocab=vocab, missing=missing, generated=bool(cached), level=level)
 

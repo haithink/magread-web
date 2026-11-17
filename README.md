@@ -15,6 +15,14 @@
 - 按文章保存多轮 AI 讨论，显示生成进度，支持停止讨论回答。
 - 粘贴完整模型配置 JSON，编辑已有模型的接口地址、模型名等配置，选择默认模型与已掌握的词汇级别；编辑时密钥留空保留原值。
 
+## 段落生词与短语
+
+生成生词表时，模型独立检查短语动词、习语、固定搭配和熟词僻义，不因组成单词都在四级词表中就跳过。例如 `It certainly won’t paper over Artemis’ many uncertainties.` 中的 `paper over` 应作为完整短语解释为“掩盖问题，而未真正解决”。
+
+对 `paper over`、`gloss over`、`fall short of` 等已内置规则的表达，程序会在模型遗漏时补上本地短语提示，保留原文词形、归入对应段落，并明确标注来源。刷新后打开已有段落词表，也能看到这些补项，不会自动调用模型或重做整篇词表。规则只覆盖部分明确表达，其他短语仍由模型结合上下文识别。
+
+点击段落词表中的「补充短语解释」，可单独让 AI 重新检查本段并给出本文含义；在全文词表中则检查全文。旧的“已检查”标记不再阻止显式复查，已有单词和个人收藏仍会保留。补短语无需初始化本地单词词典。
+
 ## 选词与本文含义
 
 用鼠标拖选正文单词或短语，或在手机上长按选词，操作工具条会出现在选中文字旁边，靠近屏幕边缘时自动避让。点击「查词并收藏」，先保存个人生词并显示可用的词典结果，随后通过默认 LLM 解释它在当前句子、段落中的含义、词性、搭配和句子译文。例如选中 `moon-bound` 中的 `bound`，模型会结合完整搭配理解目的地，而非罗列无关的“界限”等通用义项。
@@ -131,10 +139,12 @@ python -m pip install -r requirements-dev.txt
 python tests/run_web_tests.py
 python tests/run_reading_stats_tests.py
 python tests/run_word_meaning_tests.py
+python tests/run_phrase_tests.py
 python tests/run_privacy_tests.py
 python -m playwright install chromium
 python tests/run_web_browser_tests.py
 python tests/run_lookup_browser_tests.py
+python tests/run_phrase_browser_tests.py
 python tools/check_public_files.py
 ```
 

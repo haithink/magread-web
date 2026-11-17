@@ -37,7 +37,8 @@ def vocab_system(level_label: str) -> str:
         "stubborn determination 中 stubborn 强调执拗而坚定，不可仅因在四级表中而漏掉。"
         "必须独立检查重点短语，不受四级/六级单词表或本地候选限制：包括常用和不常见的习语、"
         "短语动词、固定搭配及影响句意的表达；即使组成单词全都认识也要解释。"
-        "例如 fall for、in light of、take for granted。只收原文实际出现且有助于理解的表达，"
+        "例如 paper over（掩盖问题而未解决）、fall for、in light of、take for granted。"
+        "paper、over 都是常用词，不代表 paper over 的整体含义可以跳过。只收原文实际出现且有助于理解的表达，"
         "不凑数量、不把任意相邻词当短语。短语用原文连续片段的小写形式，保留原文词形，"
         "不用 somebody、sth 或省略号替代原文；词性填 phr.，本文义说明整个短语的语境含义。"
         "每段独立收词，同词在不同段落可重复；只输出本次给出的段落，编号原样保留，-1 为标题。"
@@ -56,7 +57,7 @@ def phrases_system() -> str:
         "你是英语外刊精读助教。本次仅补充重点短语，不重复解释单个生词。"
         "独立检查常用和不常见的习语、短语动词、固定搭配及影响句意的表达；"
         "不受四级/六级单词表限制，即使组成单词全都认识也要解释。"
-        "例如 fall for、in light of、take for granted。只收原文实际出现且有助于理解的表达，"
+        "例如 paper over（掩盖问题而未解决）、fall for、in light of、take for granted。只收原文实际出现且有助于理解的表达，"
         "不凑数量、不把任意相邻词当短语。短语必须引用对应段落的连续原文片段并转小写，"
         "保留原文词形，不用 somebody、sth 或省略号替代原文。"
         "每段独立，编号原样保留，-1 为标题；每个输入段落都返回，没有重点短语就返回空 entries。"
@@ -67,7 +68,8 @@ def phrases_system() -> str:
     )
 
 
-def vocab_user(title: str, title_index: int, units, candidates, local_phonetics=(), required=None) -> str:
+def vocab_user(title: str, title_index: int, units, candidates, local_phonetics=(), required=None,
+               phrases=None, phrases_only=False) -> str:
     """只附本块候选词；正文保留全文，供判断熟词僻义与语境。"""
     out = [f"文章标题：{title[:80]}。以下为本次待处理段落（-1 表示标题）："]
     for index, text in units:
@@ -75,13 +77,17 @@ def vocab_user(title: str, title_index: int, units, candidates, local_phonetics=
         out.append(f"### 段落 {index}")
         out.append(text)
         words = candidates.get(index, [])
-        out.append("本地候选：" + (", ".join(words) if words else "无；仍需检查熟词僻义和词组"))
+        if not phrases_only:
+            out.append("本地候选：" + (", ".join(words) if words else "无；仍需检查熟词僻义和词组"))
         if required and required.get(index):
             out.append("必须收录（逐词给出本文义，不可遗漏）：" + ", ".join(required[index]))
             hints = [word + "：" + hit["translation"] for word, hit in required[index].items()
                      if hit.get("senseSource") == "context_rule"]
             if hints:
                 out.append("本地搭配提示（须结合本句核对）：" + "；".join(hints))
+        if phrases and phrases.get(index):
+            out.append("须逐项解释的原文短语（词性 phr.，根据本文选择含义；还需独立检查其他短语）：" +
+                       "；".join(word + "：" + hit["translation"] for word, hit in phrases[index].items()))
     if local_phonetics:
         out.append("这些词已有本地音标，勿重复生成：" + ", ".join(sorted(local_phonetics)))
     return "\n".join(out)
