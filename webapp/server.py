@@ -363,7 +363,8 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=()):
     def settings():
         data = config.load_settings()
         return jsonify(vocabLevel=data['vocabLevel'], models=[dict(name=p.get('name', ''), model=p.get('model', ''),
-            provider=p.get('provider', 'openai'), configured=llm.is_complete(p)) for p in data.get('llms', [])],
+            provider=p.get('provider', 'openai'), baseUrl=p.get('baseUrl', ''),
+            hasApiKey=bool(p.get('apiKey')), configured=llm.is_complete(p)) for p in data.get('llms', [])],
             defaultModel=config.default_llm_name(data), version=__version__)
 
     @app.post('/api/settings')
@@ -371,6 +372,36 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=()):
         data = payload()
         with data_lock:
             current = config.load_settings()
+            if 'modelConfig' in data:
+                if data.get('configJson'):
+                    abort(400, '请分别保存配置编辑或 JSON 导入')
+                original, changes = data.get('originalName'), data['modelConfig']
+                if not isinstance(original, str) or not original or not isinstance(changes, dict):
+                    abort(400, '无效的模型配置')
+                index = next((i for i, p in enumerate(current['llms']) if p.get('name') == original), None)
+                if index is None:
+                    abort(404, '模型配置已改变，请刷新后重试')
+                cfg = dict(current['llms'][index])
+                for key, limit in [('name', 80), ('provider', 20), ('baseUrl', 4000), ('model', 200), ('apiKey', 8192)]:
+                    if key not in changes:
+                        continue
+                    value = changes[key]
+                    if not isinstance(value, str) or len(value) > limit:
+                        abort(400, '模型配置字段格式或长度不正确')
+                    value = value.strip()
+                    if key != 'apiKey' or value:
+                        cfg[key] = value
+                if not cfg.get('name'):
+                    abort(400, '配置名称不能为空')
+                if cfg.get('provider', 'openai') not in ('openai', 'anthropic'):
+                    abort(400, '未知接口类型')
+                if cfg['name'] != original and cfg['name'] in config.llm_names(current):
+                    abort(409, '已有同名配置，请使用其他名称')
+                if error := llm.validate(cfg):
+                    abort(400, error)
+                current['llms'][index] = cfg
+                if current.get('defaultLlm') == original:
+                    current['defaultLlm'] = cfg['name']
             if 'vocabLevel' in data:
                 if data['vocabLevel'] not in gen.LEVEL_LABEL:
                     abort(400, '未知词汇级别')

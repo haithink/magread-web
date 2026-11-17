@@ -110,14 +110,22 @@ async function library(token) {
     button('＋ 添加刊物',uploadSheet,'primary')
   ]));
   if(data.recent.length) {
-    const list=el('div',{class:'recent-grid'});
-    const renderRecent=(more=false)=>{
-      list.replaceChildren(...data.recent.slice(0,more?30:3).map(r=>el('a',{class:'recent-card',href:linkFor(r.bookId,r.articleIndex)},
+    const list=el('div',{class:'recent-grid',id:'recent-reading'});
+    let expanded=false;
+    const more=button('更多 →',()=>{expanded=!expanded;renderRecent();},'text-button');
+    more.setAttribute('aria-controls','recent-reading');
+    more.classList.toggle('recent-more-desktop-empty',data.recent.length===3);
+    const renderRecent=()=>{
+      more.textContent=expanded?'收起 ↑':'更多 →';
+      more.setAttribute('aria-expanded',String(expanded));
+      more.hidden=data.recent.length<=2;
+      list.classList.toggle('expanded',expanded);
+      list.replaceChildren(...data.recent.slice(0,expanded?data.recent.length:3).map(r=>el('a',{class:'recent-card',href:linkFor(r.bookId,r.articleIndex)},
         el('small',{},r.bookTitle),el('h3',{},r.title),
         el('div',{class:'recent-bottom'},el('span',{},`第 ${r.paragraphIndex+1} 段 · ${Math.round(r.progress*100)}%`),el('span',{},'继续阅读 →')),
         el('div',{class:'progress-line'},el('progress',{max:1,value:r.progress})))));
     };
-    content.append(el('div',{class:'section-title'},el('h2',{},'继续阅读'),button('更多 →',()=>renderRecent(true),'text-button')),list); renderRecent();
+    content.append(el('div',{class:'section-title'},el('h2',{},'继续阅读'),more),list); renderRecent();
   }
   const search=el('input',{class:'search',type:'search',placeholder:'搜索刊名、期号…','aria-label':'搜索刊物'});
   const publications=[...new Set(data.books.map(b=>b.publication))];
@@ -507,7 +515,8 @@ async function settingsPage(token) {
   level.onchange=action(async()=>{await api('/settings',{method:'POST',data:{vocabLevel:level.value}});toast('词汇水平已保存');});
   const models=el('div');
   for(const item of data.models)models.append(el('div',{class:'model-item'},el('div',{},item.name,el('small',{},item.provider+' · '+item.model)),
-    button(item.name===data.defaultModel?'默认模型':'设为默认',action(async()=>{await api('/settings',{method:'POST',data:{defaultModel:item.name}});route();}),item.name===data.defaultModel?'secondary':'')));
+    el('div',{class:'model-actions'},button('编辑',()=>editModel(item)),
+      button(item.name===data.defaultModel?'默认模型':'设为默认',action(async()=>{await api('/settings',{method:'POST',data:{defaultModel:item.name}});route();}),item.name===data.defaultModel?'secondary':''))));
   if(!data.models.length)models.append(el('p',{class:'muted'},'尚未配置模型。已有的阅读结果仍可浏览。'));
   const name=el('input',{placeholder:'配置名称（可留空）'}),json=el('textarea',{placeholder:'粘贴完整 cc-switch / Claude Code / OpenAI 配置 JSON',rows:7,spellcheck:false,autocomplete:'off'});
   const form=el('form',{class:'form-stack'},el('label',{},'名称',name),el('label',{},'配置 JSON',json),
@@ -515,7 +524,33 @@ async function settingsPage(token) {
   form.onsubmit=action(async event=>{event.preventDefault();await api('/settings',{method:'POST',data:{name:name.value,configJson:json.value}});json.value='';toast('模型配置已保存');route();});
   view.replaceChildren(heading('MAKE IT YOURS','阅读设置','模型和词汇水平由这台服务器统一管理'),
     el('div',{class:'settings-grid'},el('section',{class:'panel'},el('h2',{},'阅读偏好'),el('label',{},'默认已掌握的词汇',level),el('hr'),el('h2',{},'模型配置'),models),
-      el('section',{class:'panel'},el('h2',{},'添加 / 更新模型'),form)));
+      el('section',{class:'panel'},el('h2',{},'导入模型配置'),form)));
+}
+
+function editModel(initial) {
+  const name=el('input',{value:initial.name,required:true,maxlength:80,autocomplete:'off'});
+  const provider=el('select',{'aria-label':'接口类型'},el('option',{value:'openai'},'OpenAI 兼容'),el('option',{value:'anthropic'},'Anthropic 兼容'));
+  provider.value=initial.provider;
+  const baseUrl=el('input',{type:'url',value:initial.baseUrl,required:true,maxlength:4000,spellcheck:false});
+  const model=el('input',{value:initial.model,required:true,maxlength:200,spellcheck:false});
+  const key=el('input',{type:'password',autocomplete:'new-password',spellcheck:false,maxlength:8192,
+    required:!initial.hasApiKey,placeholder:initial.hasApiKey?'已保存，留空保留原密钥':'输入 API Key'});
+  const submit=el('button',{type:'submit',class:'primary'},'保存模型配置');
+  const error=el('p',{class:'error',role:'alert',hidden:true});
+  const form=el('form',{class:'form-stack'},el('label',{},'配置名称',name),el('label',{},'接口类型',provider),
+    el('label',{},'API 地址',baseUrl),el('label',{},'模型名称',model),el('label',{},'API Key',key),
+    el('small',{class:'muted'},'原密钥不会回传到页面。留空保留，填写新密钥则替换。'),error,
+    el('div',{class:'row'},submit,button('取消',()=>$('#sheet').close())));
+  form.onsubmit=async event=>{
+    event.preventDefault();submit.disabled=true;error.hidden=true;
+    try {
+      await api('/settings',{method:'POST',data:{originalName:initial.name,modelConfig:{name:name.value,
+        provider:provider.value,baseUrl:baseUrl.value,model:model.value,apiKey:key.value}}});
+      key.value='';$('#sheet').close();toast('模型配置已更新');await route();
+    } catch(failure) {error.textContent=failure.message;error.hidden=false;}
+    finally {submit.disabled=false;}
+  };
+  showSheet('编辑模型配置',form);
 }
 
 async function route() {

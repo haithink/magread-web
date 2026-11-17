@@ -57,6 +57,63 @@ def check_vocab_scroll_isolation(page, paragraph, long_list=False):
     assert snapshot()['y'] > before['y'], 'Article scrolling must resume after closing the dialog'
 
 
+def check_model_editor(page, new_name, replace_key=False):
+    page.get_by_role('link', name='设置', exact=True).click()
+    page.reload()
+    expect(page.get_by_role('heading', name='阅读设置')).to_be_visible()
+    initial = config.load_settings()['llms'][0]
+    page.locator('.model-item').get_by_role('button', name='编辑', exact=True).click()
+    expect(page.get_by_label('API 地址', exact=True)).to_have_value(initial['baseUrl'])
+    expect(page.get_by_label('模型名称', exact=True)).to_have_value(initial['model'])
+    expect(page.get_by_label('API Key', exact=True)).to_have_value('')
+    assert initial['apiKey'] not in page.content(), 'Stored key must never be returned to the browser'
+    page.get_by_label('配置名称', exact=True).fill('cancelled')
+    page.get_by_role('button', name='取消', exact=True).click()
+    assert config.load_settings()['llms'][0]['name'] == initial['name']
+    page.locator('.model-item').get_by_role('button', name='编辑', exact=True).click()
+    page.get_by_label('配置名称', exact=True).fill(new_name)
+    page.get_by_label('接口类型', exact=True).select_option('anthropic')
+    page.get_by_label('API 地址', exact=True).fill('https://edited.example.invalid/anthropic')
+    page.get_by_label('模型名称', exact=True).fill('edited-model')
+    if replace_key:
+        page.get_by_label('API Key', exact=True).fill('browser-replacement-test-only')
+    page.get_by_role('button', name='保存模型配置', exact=True).click()
+    expect(page.locator('#sheet')).not_to_be_visible()
+    expect(page.locator('.model-item')).to_contain_text(new_name)
+    expect(page.locator('.model-item')).to_contain_text('edited-model')
+    expect(page.locator('.model-item').get_by_role('button', name='默认模型', exact=True)).to_be_visible()
+    saved = config.load_settings()
+    assert len(saved['llms']) == 1
+    assert saved['defaultLlm'] == new_name
+    assert saved['llms'][0]['apiKey'] == ('browser-replacement-test-only' if replace_key else initial['apiKey'])
+    assert saved['llms'][0]['baseUrl'] == 'https://edited.example.invalid/anthropic'
+    assert saved['llms'][0]['provider'] == 'anthropic'
+    assert saved['llms'][0]['apiKey'] not in page.content()
+
+
+def check_recent_reading(page, collapsed_count, touch=False):
+    page.get_by_role('link', name='书库', exact=True).click()
+    cards = page.locator('.recent-card:visible')
+    more = page.get_by_role('button', name='更多 →', exact=True)
+    expect(cards).to_have_count(collapsed_count)
+    expect(more).to_have_attribute('aria-expanded', 'false')
+    # A real touch event exercises the phone interaction as well as its CSS.
+    if touch:
+        more.tap()
+    else:
+        more.click()
+    expect(cards).to_have_count(35)
+    collapse = page.get_by_role('button', name='收起 ↑', exact=True)
+    expect(collapse).to_have_attribute('aria-expanded', 'true')
+    collapse.click()
+    expect(cards).to_have_count(collapsed_count)
+    page.get_by_role('button', name='更多 →', exact=True).click()
+    target = cards.nth(4)
+    article_index = target.get_attribute('href').split('/')[-1]
+    target.click()
+    expect(page.locator('.reader-head h1')).to_have_text(f'Recent article {article_index}')
+
+
 def main():
     WebTests.setUpClass()
     app = WebTests.app
@@ -209,9 +266,23 @@ def main():
             expect(phone.get_by_role('heading',name='阅读设置')).to_be_visible()
             width=phone.evaluate('() => ({scroll:document.documentElement.scrollWidth, width:innerWidth})')
             assert width['scroll']<=width['width'],width
+            check_model_editor(page, 'Desktop edited')
+            check_model_editor(phone, 'Phone edited', replace_key=True)
+            width=phone.evaluate('() => ({scroll:document.documentElement.scrollWidth, width:innerWidth})')
+            assert width['scroll']<=width['width'],width
+            extra_articles=[dict(index=i,title=f'Recent article {i}',paragraphs=[
+                'This is a recent article used only in isolated browser tests.'
+            ]) for i in range(1,35)]
+            store._atomic_json_write(config.app_dir() / 'cache/sample/content.json',dict(
+                bookSize=WebTests.meta['size'],format='epub',articles=[article,*extra_articles]))
+            for art in extra_articles:
+                store.save_reading_progress('sample',art['index'],dict(title=art['title'],paragraphIndex=0,
+                    paragraphCount=1,paragraphOffset=0,progress=.2,wordCount=12))
+            check_recent_reading(page, 3)
+            check_recent_reading(phone, 2, touch=True)
             assert not errors,errors
             assert not requests,requests
-            print('BROWSER PASS: desktop + 390px phone; modal wheel isolation, unchanged saved position, restored article scrolling, live progress, recent word source/search/jump, legacy source fallback, isolated double-click, login, mark, vocab, discussion, sync, edit, no overflow/errors')
+            print('BROWSER PASS: desktop + 390px touch phone; model edit/cancel/rename/key preservation/replacement, recent expand/collapse/35 links, modal wheel isolation, saved position, live progress, word source/search/jump, isolated double-click, login, mark, vocab, discussion, sync, no overflow/errors')
             browser.close()
     finally:
         server.shutdown()

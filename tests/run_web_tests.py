@@ -108,6 +108,60 @@ class WebTests(unittest.TestCase):
         finally:
             app.extensions['jobs'].pool.shutdown(wait=True)
 
+    def test_model_edit_preserves_key_order_and_default_and_can_replace_key(self):
+        original = config.load_settings()
+        try:
+            first = dict(original['llms'][0], customOption='preserved')
+            second = dict(first, name='backup')
+            config.save_settings(dict(original, llms=[first, second], defaultLlm=first['name']))
+            public = self.client.get('/api/settings')
+            self.assertEqual(public.json['models'][0]['baseUrl'], first['baseUrl'])
+            self.assertTrue(public.json['models'][0]['hasApiKey'])
+            self.assertNotIn('apiKey', public.json['models'][0])
+            self.assertNotIn(first['apiKey'], public.text)
+            edit = dict(name='renamed', provider='anthropic', baseUrl='https://edited.example.invalid/anthropic',
+                        model='edited-model', apiKey='  ')
+            response = self.post('/settings', dict(originalName=first['name'], modelConfig=edit))
+            self.assertEqual(response.status_code, 200, response.json)
+            saved = config.load_settings()
+            self.assertEqual(config.llm_names(saved), ['renamed', 'backup'])
+            self.assertEqual(saved['defaultLlm'], 'renamed')
+            self.assertEqual(saved['llms'][0]['apiKey'], first['apiKey'])
+            self.assertEqual(saved['llms'][0]['baseUrl'], edit['baseUrl'])
+            self.assertEqual(saved['llms'][0]['model'], edit['model'])
+            self.assertEqual(saved['llms'][0]['provider'], 'anthropic')
+            self.assertEqual(saved['llms'][0]['customOption'], 'preserved')
+            response = self.post('/settings', dict(originalName='backup', modelConfig=dict(name='other', apiKey='replacement-test-only')))
+            self.assertEqual(response.status_code, 200, response.json)
+            saved = config.load_settings()
+            self.assertEqual(saved['defaultLlm'], 'renamed', 'Editing a backup must not change the default')
+            self.assertEqual(saved['llms'][1]['apiKey'], 'replacement-test-only')
+            public = self.client.get('/api/settings')
+            self.assertNotIn('replacement-test-only', public.text)
+            self.assertNotIn(first['apiKey'], public.text)
+        finally:
+            config.save_settings(original)
+
+    def test_invalid_model_edits_do_not_overwrite_existing_configuration(self):
+        original = config.load_settings()
+        try:
+            first = original['llms'][0]
+            config.save_settings(dict(original, llms=[first, dict(first, name='occupied')]))
+            before = config.load_settings()
+            for changes, status in [(dict(name='occupied'), 409), (dict(name=' '), 400),
+                    (dict(baseUrl='file:///invalid'), 400), (dict(model=''), 400),
+                    (dict(provider='invalid'), 400), (dict(apiKey=None), 400),
+                    (dict(baseUrl=[]), 400), ([], 400)]:
+                with self.subTest(changes=changes):
+                    response = self.post('/settings', dict(originalName=first['name'], modelConfig=changes))
+                    self.assertEqual(response.status_code, status, response.json)
+                    self.assertEqual(config.load_settings(), before)
+            self.assertEqual(self.post('/settings', dict(originalName='missing', modelConfig={})).status_code, 404)
+            self.assertEqual(self.post('/settings', dict(modelConfig={})).status_code, 400)
+            self.assertEqual(config.load_settings(), before)
+        finally:
+            config.save_settings(original)
+
     def test_read_existing_cache_without_model_or_reparse(self):
         with patch.object(store, 'epub_parse', side_effect=AssertionError('Do not reparse cached source')):
             books = self.client.get('/api/library').json['books']
