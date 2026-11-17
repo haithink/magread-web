@@ -50,6 +50,57 @@ class DuplicateTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.json)
         return response.json
 
+    def library_books(self):
+        response = self.client.get('/api/library')
+        self.assertEqual(response.status_code, 200)
+        return {book['id']:book for book in response.json['books']}
+
+    def test_home_counts_match_directory_for_earlier_same_day_unknown_and_all_duplicate_issues(self):
+        same, _ = publication('same', 'Other_2026.11.02.pdf', [self.articles[1]['title']], ext='pdf')
+        unknown, _ = publication('unknown', 'Undated.epub', [self.articles[0]['title']])
+        all_dup, _ = publication('all_dup', 'Wired_2026.12.02.epub', [self.articles[0]['title'],self.articles[1]['title']])
+        store.save_library([all_dup, self.current, unknown, same, self.older])
+        books = self.library_books()
+        self.assertEqual((books['new']['articleCount'],books['new']['summaryCount']), (1,1))
+        self.assertEqual(books['new']['totalArticleCount'], 3)
+        self.assertEqual(books['new']['duplicateCount'], 2)
+        self.assertEqual((books['all_dup']['articleCount'],books['all_dup']['summaryCount']), (0,0))
+        self.assertTrue(books['all_dup']['articleCountKnown'])
+        self.assertEqual(books['same']['articleCount'], 1)
+        self.assertEqual(books['unknown']['articleCount'], 1)
+        for ident, book in books.items():
+            directory = self.client.get('/api/books/'+ident).json
+            visible = [a for a in directory['articles'] if not a['earlierOccurrence']]
+            self.assertEqual(book['articleCount'], len(visible), ident)
+            self.assertEqual(book['summaryCount'], len([a for a in visible if a['summaryZh']]), ident)
+
+    def test_home_counts_indexed_articles_before_summary_generation_without_parsing(self):
+        fresh, _ = publication('fresh', 'New_2026.12.02.epub', [self.articles[0]['title'],'A fresh article'], summarized=False)
+        pending, _ = publication('pending', 'New_2027.01.02.epub', [], cached=False, summarized=False)
+        store.save_library([self.current, self.older, fresh, pending])
+        with (patch.object(store, 'ensure_content', side_effect=AssertionError('Homepage must use caches')),
+              patch.object(store, 'epub_parse', side_effect=AssertionError('No parsing')),
+              patch.object(store, 'pdf_parse', side_effect=AssertionError('No parsing'))):
+            books = self.library_books()
+        self.assertEqual((books['fresh']['articleCount'],books['fresh']['summaryCount']), (1,0))
+        self.assertTrue(books['fresh']['articleCountKnown'])
+        self.assertFalse(books['pending']['articleCountKnown'])
+        self.assertFalse((config.app_dir()/'cache/pending/content.json').exists())
+
+    def test_home_summary_count_ignores_hidden_failed_and_duplicate_summary_rows_and_refreshes(self):
+        path = config.app_dir()/'cache/new/digest.json'
+        value = store._json_read(path)
+        value['articles'][1]['summaryZh'] = '（本篇摘要生成失败，请重试）'
+        store._atomic_json_write(path, value)
+        self.assertEqual(self.library_books()['new']['summaryCount'], 0)
+        value['articles'][1]['summaryZh'] = '生成完成'
+        value['articles'].append(dict(value['articles'][1]))
+        store._atomic_json_write(path, value)
+        self.assertEqual(self.library_books()['new']['summaryCount'], 1)
+        store.save_library([self.current])
+        books = self.library_books()
+        self.assertEqual((books['new']['articleCount'],books['new']['summaryCount']), (3,3))
+
     def test_api_marks_earlier_titles_preserving_indices_states_history_and_files(self):
         store.set_article_state('new', 0, 'read')
         store.save_reading_progress('new', 0, dict(

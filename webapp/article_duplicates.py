@@ -87,3 +87,33 @@ def earlier_occurrences(meta, articles):
         if len(found) == len(wanted):
             break
     return {a['index']: found[key] for a in articles if (key := title_key(a['title'])) in found}
+
+
+def library_counts(library, digests):
+    """Count each issue's visible articles in one chronological pass over cached titles."""
+    result, dated, earlier_titles = {}, {}, set()
+
+    def count(meta, titles, previous):
+        visible = {index for key, index in titles if key not in previous}
+        hidden = {index for key, index in titles if key in previous}
+        summaries = {entry['index'] for entry in digests.get(meta['id'], {}).get('articles', [])
+                     if entry.get('index') in visible and entry.get('summaryZh')
+                     and not entry['summaryZh'].startswith('（本篇摘要生成失败')}
+        result[meta['id']] = dict(articleCount=len(visible), summaryCount=len(summaries),
+            totalArticleCount=len(visible | hidden), duplicateCount=len(hidden), articleCountKnown=bool(titles))
+
+    for meta in library:
+        titles = cached_titles(meta)
+        published = issue_date(meta)
+        if published is None:
+            count(meta, titles, set())
+        else:
+            dated.setdefault(published, []).append((meta, titles))
+    for published in sorted(dated):
+        # Same-day PDF/EPUB versions must not hide each other. Add their titles
+        # only after counting every issue on that date, matching the directory.
+        for meta, titles in dated[published]:
+            count(meta, titles, earlier_titles)
+        for _, titles in dated[published]:
+            earlier_titles.update(key for key, _ in titles)
+    return result

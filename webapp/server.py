@@ -257,12 +257,13 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=()):
     @app.get('/api/library')
     def library():
         books, recent = [], []
-        for meta in store.load_library():
-            digest = store.load_digest(meta['id']) or {}
-            entries = digest.get('articles', [])
+        library = store.load_library()
+        digests = {meta['id']: store.load_digest(meta['id']) or {} for meta in library}
+        counts = article_duplicates.library_counts(library, digests)
+        for meta in library:
             publication = re.sub(r'[_ .-]*\d{4}.*$', '', meta['fileName']).replace('_', ' ').strip() or '其他刊物'
             books.append(dict(id=meta['id'], fileName=meta['fileName'], ext=meta['ext'], publication=publication,
-                articleCount=len(entries), summaryCount=sum(bool(e.get('summaryZh')) and not e['summaryZh'].startswith('（本篇摘要生成失败') for e in entries),
+                **counts[meta['id']],
                 cover=store.has_cover(meta['id']), available=Path(meta['path']).is_file()))
             for idx, record in store.load_reading_history(meta['id']).items():
                 recent.append(dict(record, bookId=meta['id'], articleIndex=int(idx), bookTitle=meta['fileName']))

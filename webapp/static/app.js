@@ -145,10 +145,12 @@ async function library(token) {
       const grid=el('div',{class:'book-grid'});
       for(const book of books) {
         const cover=book.cover?el('img',{src:`/api/books/${encodeURIComponent(book.id)}/cover`,alt:book.fileName,loading:'lazy'}):el('span',{class:'cover-placeholder'},name);
+        const articleCount=book.articleCountKnown?`${book.articleCount} 篇文章`:'待解析文章';
+        const summaryCount=book.articleCountKnown&&book.articleCount===0?'本期均为重复文章':book.summaryCount?`${book.summaryCount} 篇已有摘要`:'待生成摘要';
         grid.append(el('article',{class:'book-card'},el('a',{class:'cover-link',href:`#/book/${encodeURIComponent(book.id)}`},cover,
           el('span',{class:'format-tag'},book.ext.toUpperCase())),
           el('h3',{},el('a',{href:`#/book/${encodeURIComponent(book.id)}`},book.fileName.replace(/\.(epub|pdf)$/i,''))),
-          el('div',{class:'count'},book.available?`${book.articleCount?book.articleCount+' 篇文章 · ':''}${book.summaryCount?book.summaryCount+' 篇已有摘要':'待生成摘要'}`:'原文件暂不可用')));
+          el('div',{class:'count'},book.available?`${articleCount} · ${summaryCount}`:'原文件暂不可用')));
       }
       result.append(el('section',{class:'library-section'},el('div',{class:'section-title'},el('h2',{},name),el('span',{class:'count'},`${books.length} 本`)),grid));
     }
