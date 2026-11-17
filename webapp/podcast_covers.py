@@ -1,10 +1,14 @@
-"""Small local typographic covers; no website images, model calls or extra assets."""
+"""Cached official series artwork, with local typographic covers as a fallback."""
 from functools import lru_cache
 import hashlib
 import os
 from pathlib import Path
 import re
 import tempfile
+from io import BytesIO
+from urllib.parse import urlsplit, urljoin
+
+import requests
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -76,7 +80,7 @@ def render(meta):
     draw.line((408, 89, 408, 99), fill=accent, width=2)
     draw.line((397, 100, 419, 100), fill=accent, width=2)
     number = str(meta.get('episodeNumber') or '')
-    draw.text((39, 116), '#'+number if number else 'Transcript', font=_font(82 if number else 48, True), fill=paper)
+    draw.text((39, 116), '#'+number if number else 'PODCAST', font=_font(82 if number else 48, True), fill=paper)
     draw.line((43, 231, 436, 231), fill=accent, width=2)
     title = re.sub(r'^#\d+\s*[·:—-]?\s*', '', str(meta.get('title') or 'Transcript'))
     title_font = _font(29, True)
@@ -111,6 +115,81 @@ def ensure_cover(meta):
         os.replace(temp_path, out)
     finally:
         image.close()
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+    return str(out)
+
+
+def _official_image(spec, control=None):
+    """Fetch only a built-in official host, validating each redirect and image."""
+    target = spec['coverUrl']
+    for _ in range(4):
+        parts = urlsplit(target)
+        if (parts.scheme != 'https' or parts.netloc.lower() != spec['host'] or
+                parts.username or parts.password or parts.query or parts.fragment):
+            raise ValueError('封面地址不属于播客官网')
+        if control:
+            control.check()
+        with requests.get(target, timeout=(8, 20), stream=True, allow_redirects=False,
+                headers={'User-Agent':'KanduWeb/0.1', 'Accept':'image/*'}) as response:
+            if control:
+                control.bind(response)
+            try:
+                if response.status_code in (301, 302, 303, 307, 308):
+                    target = urljoin(target, response.headers.get('Location', ''))
+                    continue
+                response.raise_for_status()
+                chunks, size = [], 0
+                for chunk in response.iter_content(65536):
+                    if control:
+                        control.check()
+                    size += len(chunk)
+                    if size > 10 * 1024**2:
+                        raise ValueError('官网封面超过大小限制')
+                    chunks.append(chunk)
+                with Image.open(BytesIO(b''.join(chunks))) as original:
+                    if original.width * original.height > 25_000_000:
+                        raise ValueError('官网封面尺寸过大')
+                    original.thumbnail((640, 640))
+                    return original.convert('RGB')
+            finally:
+                if control:
+                    control.unbind()
+    raise ValueError('官网封面重定向过多')
+
+
+def ensure_series_cover(spec, download=False, control=None):
+    """Network is allowed only in a background import, never in page requests.
+
+    A source marker distinguishes official artwork from an offline fallback so
+    the next import can retry a previously unavailable website.
+    """
+    out = store.cover_file('podcast-series-' + spec['id'])
+    marker = out.with_suffix('.source.json')
+    saved = store._json_read(marker) or {}
+    if out.is_file() and (not download or saved.get('url') == spec.get('coverUrl')):
+        return str(out)
+    artwork, official = None, False
+    if download and spec.get('coverUrl'):
+        try:
+            artwork = _official_image(spec, control)
+            official = True
+        except (requests.RequestException, ValueError, OSError):
+            if control:
+                control.check()
+    if artwork is None:
+        if out.is_file():
+            return str(out)
+        artwork = render(dict(id='podcast-series-'+spec['id'], publication=spec['name'], title=spec['name']))
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=out.parent, suffix='.jpg', delete=False) as file:
+            temp_path = Path(file.name)
+        artwork.save(temp_path, 'JPEG', quality=88, optimize=True)
+        os.replace(temp_path, out)
+        store._atomic_json_write(marker, dict(url=spec['coverUrl'] if official else '', official=official))
+    finally:
+        artwork.close()
         if temp_path is not None:
             temp_path.unlink(missing_ok=True)
     return str(out)

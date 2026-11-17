@@ -152,13 +152,13 @@ async function library(token) {
       books.sort((a,b)=>a.sourceType==='podcast'&&b.sourceType==='podcast'?b.episodeNumber-a.episodeNumber:b.fileName.localeCompare(a.fileName,undefined,{numeric:true}));
       const grid=el('div',{class:'book-grid'});
       for(const book of books) {
-        const isPodcast=book.sourceType==='podcast';
+        const isPodcast=book.sourceType==='podcast'||book.sourceType==='podcast-series';
         const cover=book.cover?el('img',{src:`/api/books/${encodeURIComponent(book.id)}/cover`,alt:book.title||book.fileName,loading:'lazy'}):isPodcast?
           el('span',{class:'podcast-cover'},el('small',{},name.replace(/ Podcast$/i,'').toUpperCase()),el('strong',{},'#'+book.episodeNumber),el('span',{},'PODCAST'),el('small',{},book.publishedAt||'TRANSCRIPT')):el('span',{class:'cover-placeholder'},name);
         const articleCount=book.articleCountKnown?`${book.articleCount} 篇文章`:'待解析文章';
         const summaryCount=book.articleCountKnown&&book.articleCount===0?'本期均为重复文章':book.summaryCount?`${book.summaryCount} 篇已有摘要`:'待生成摘要';
         grid.append(el('article',{class:'book-card'},el('a',{class:'cover-link',href:`#/book/${encodeURIComponent(book.id)}`},cover,
-          el('span',{class:'format-tag'},isPodcast?'TRANSCRIPT':book.ext.toUpperCase())),
+          el('span',{class:'format-tag'},isPodcast?'PODCAST':book.ext.toUpperCase())),
           el('h3',{},el('a',{href:`#/book/${encodeURIComponent(book.id)}`},book.title||book.fileName.replace(/\.(epub|pdf)$/i,''))),
           el('div',{class:'count'},book.available?`${articleCount} · ${summaryCount}`:'原文件暂不可用')));
       }
@@ -171,7 +171,7 @@ async function library(token) {
 
 async function podcastSheet() {
   const data=await api('/podcast-sources');
-  const body=el('div',{class:'form-stack'},el('p',{class:'muted'},'从官方网站导入文字 Transcript，每期作为一本书。自动使用默认 LLM 生成中文摘要，暂不生成生词表；再次导入会跳过已有内容并补缺。'));
+  const body=el('div',{class:'form-stack'},el('p',{class:'muted'},'从官方网站导入文字 Transcript，同一播客作为一本书，每期作为一篇文章。自动使用默认 LLM 生成中文摘要，暂不生成生词表；再次导入会跳过已有内容并补缺。'));
   const sheet=showSheet('刊物来源 · Podcast',body);
   for(const source of data.sources) {
     let jobId=source.jobId;
@@ -202,7 +202,7 @@ async function podcastSheet() {
     start.disabled=running;
     body.append(el('section',{class:'podcast-source'},el('h3',{},source.name),
       el('a',{href:source.url,target:'_blank',rel:'noopener noreferrer',class:'duplicate-source'},'官方网站 ↗'),
-      el('p',{class:'count'},'保存文字并在本地生成简洁封面。长篇摘要采用覆盖全文的分段摘录。'),
+      el('p',{class:'count'},'首页只显示一个系列入口，使用官网封面。长篇摘要采用覆盖全文的分段摘录。'),
       status,progress,failures,el('div',{class:'row'},start,stop)));
     if(running&&source.jobId)watchJob(source.jobId,done,render);
     render({status:source.status.status,result:source.status});
@@ -237,7 +237,9 @@ function uploadSheet() {
 const labels={unread:'未读',read:'已读',uninterested:'不感兴趣'};
 async function digestPage(bookId,token) {
   const data=await api('/books/'+encodeURIComponent(bookId));if(token!==state.route)return;
-  const q=el('input',{class:'search',type:'search',placeholder:'搜索标题、摘要…','aria-label':'搜索文章'});
+  const isSeries=data.sourceType==='podcast-series';
+  const articleLink=a=>linkFor(a.bookId||bookId,a.articleIndex??a.index);
+  const q=el('input',{class:'search',type:'search',placeholder:isSeries?'搜索期号、日期、嘉宾、摘要…':'搜索标题、摘要…','aria-label':'搜索文章'});
   let filter='all';const grid=el('div',{class:'article-grid'}),tabs=el('div',{class:'tabs'});
   const duplicateCount=data.articles.filter(a=>a.earlierOccurrence).length;
   const showDuplicates=el('input',{type:'checkbox',id:'show-duplicate-articles'});
@@ -249,19 +251,19 @@ async function digestPage(bookId,token) {
     const select=el('select',{'aria-label':'文章标记'},...Object.entries(labels).map(([k,v])=>el('option',{value:k},v)));
     select.value=a.state;
     select.onchange=action(async()=>{const previous=a.state;select.disabled=true;
-      try{await api(`/books/${encodeURIComponent(bookId)}/state`,{method:'POST',data:{articleIndex:a.index,state:select.value}});a.state=select.value;
+      try{await api(`/books/${encodeURIComponent(a.bookId||bookId)}/state`,{method:'POST',data:{articleIndex:a.articleIndex??a.index,state:select.value}});a.state=select.value;
         $('.state-pill',cards.get(a.index)).textContent=labels[a.state];render();}
       catch(error){select.value=previous;throw error;}finally{select.disabled=false;}
     });return select;
   };
   for(const a of data.articles) {
     const card=el('article',{class:'article-card'},
-      el('div',{class:'card-top'},el('span',{},`ARTICLE ${String(a.index+1).padStart(2,'0')}`),el('span',{class:'state-pill'},labels[a.state])),
-      el('a',{href:linkFor(bookId,a.index)},el('h2',{},a.titleEn),a.titleZh?el('h3',{},a.titleZh):null),
+      el('div',{class:'card-top'},el('span',{},isSeries?`EPISODE #${a.episodeNumber} · ${a.publishedAt||''}`:`ARTICLE ${String(a.index+1).padStart(2,'0')}`),el('span',{class:'state-pill'},labels[a.state])),
+      el('a',{href:articleLink(a)},el('h2',{},a.titleEn),a.titleZh?el('h3',{},a.titleZh):null),
       el('p',{},a.summaryZh||'这篇文章尚未生成摘要，可以直接打开原文阅读。'),
       a.earlierOccurrence?el('a',{class:'duplicate-source',href:linkFor(a.earlierOccurrence.bookId,a.earlierOccurrence.articleIndex)},
         '更早收录于 '+a.earlierOccurrence.fileName.replace(/\.(epub|pdf)$/i,'')+' ↗'):null,
-      el('div',{class:'card-bottom'},stateSelect(a),el('a',{href:linkFor(bookId,a.index)},a.history?`继续阅读 ${Math.round(a.history.progress*100)}% →`:'打开文章 →')));
+      el('div',{class:'card-bottom'},stateSelect(a),el('a',{href:articleLink(a)},a.history?`继续阅读 ${Math.round(a.history.progress*100)}% →`:'打开文章 →')));
     cards.set(a.index,card);
   }
   const tabButtons=new Map();for(const [key,label] of [['all','全部'],...Object.entries(labels)]){
@@ -269,19 +271,19 @@ async function digestPage(bookId,token) {
   }
   function render(){
     const articles=visibleArticles(),c=counts(articles);
-    issueCount.textContent=duplicateCount?`共 ${data.articles.length} 篇 · ${showDuplicates.checked?'包含 '+duplicateCount+' 篇重复文章':'已隐藏 '+duplicateCount+' 篇重复文章'}`:`${data.articles.length} 篇文章`;
+    issueCount.textContent=duplicateCount?`共 ${data.articles.length} 篇 · ${showDuplicates.checked?'包含 '+duplicateCount+' 篇重复文章':'已隐藏 '+duplicateCount+' 篇重复文章'}`:`${data.articles.length} ${isSeries?'期节目':'篇文章'}`;
     for(const [k,b]of tabButtons){b.textContent=`${k==='all'?'全部':labels[k]} ${c[k]}`;b.classList.toggle('active',k===filter);}
     const terms=q.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
-    const matches=articles.filter(a=>(filter==='all'||a.state===filter)&&terms.every(t=>(a.titleEn+' '+a.titleZh+' '+a.summaryZh).toLowerCase().includes(t)));
+    const matches=articles.filter(a=>(filter==='all'||a.state===filter)&&terms.every(t=>(a.titleEn+' '+a.titleZh+' '+a.summaryZh+' '+(a.episodeNumber?'#'+a.episodeNumber:'')+' '+(a.publishedAt||'')+' '+(a.guest||'')).toLowerCase().includes(t)));
     grid.replaceChildren(...matches.map(a=>cards.get(a.index)));
     if(!matches.length)grid.append(!articles.length&&duplicateCount&&!showDuplicates.checked?
       empty('本期文章均已在更早刊物出现','勾选“显示重复文章”可查看原目录，摘要和阅读记录仍保留。'):empty('没有匹配的文章'));
   }
   q.oninput=render;showDuplicates.onchange=render;
   view.replaceChildren(el('a',{href:'#/library',class:'back'},'← 我的书库'),
-    el('div',{class:'digest-head'},heading('ISSUE CONTENTS',data.title||data.fileName.replace(/\.(epub|pdf)$/i,''),issueCount,[
+    el('div',{class:'digest-head'},heading(isSeries?'PODCAST EPISODES':'ISSUE CONTENTS',data.title||data.fileName.replace(/\.(epub|pdf)$/i,''),issueCount,[
       button('生成 / 补缺摘要',action(()=>runJob(`/books/${encodeURIComponent(bookId)}/generate-digest`,{},()=>{if(token===state.route)route();})),'primary')
-    ])),data.sourceUrl?el('div',{class:'podcast-provenance'},el('a',{href:data.sourceUrl,target:'_blank',rel:'noopener noreferrer'},'官方 Transcript ↗'),
+    ])),data.sourceUrl?el('div',{class:'podcast-provenance'},el('a',{href:data.sourceUrl,target:'_blank',rel:'noopener noreferrer'},isSeries?'播客官网 ↗':'官方 Transcript ↗'),
       data.excerpted?el('span',{class:'count'},'摘要基于覆盖全文的分段摘录；正文为完整 Transcript。'):null):null,
     el('div',{class:'filters'},q,duplicateCount?el('label',{class:'duplicate-toggle'},showDuplicates,`显示重复文章（${duplicateCount}）`):null),tabs,el('div',{class:'filters'}),grid);
   render();
@@ -374,7 +376,7 @@ async function readerPage(bookId,index,token,startParagraph=null) {
   const vocabButton=button('生成生词表',action(()=>openVocab(null)),'primary');vocabButton.id='vocab-button';
   const find=el('input',{type:'search',placeholder:'在本文中查找…','aria-label':'查找原文'});
   const findRow=el('div',{class:'find-row',hidden:true},find,el('span',{class:'count',id:'find-count'}),button('×',()=>{find.value='';findArticle(reader,'');findRow.hidden=true;}));
-  const tools=el('div',{class:'reader-toolbar'},el('a',{href:`#/book/${encodeURIComponent(bookId)}`},'← 目录'),vocabButton,
+  const tools=el('div',{class:'reader-toolbar'},el('a',{href:`#/book/${encodeURIComponent(data.parentBookId||bookId)}`},'← 目录'),vocabButton,
     button(data.state==='read'?'已读 ✓':'标记已读',action(async event=>{
       const target=event.target.closest('button');target.disabled=true;
       try{await api(`/books/${encodeURIComponent(bookId)}/state`,{method:'POST',data:{articleIndex:index,state:'read'}});

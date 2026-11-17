@@ -7,7 +7,9 @@ from unittest.mock import patch
 from wsgiref.simple_server import make_server
 
 from playwright.sync_api import sync_playwright, expect
+from PIL import Image
 from run_podcast_tests import WebTests, config, store, llm, podcasts, catalog_html, transcript_html, fake_model
+from webapp import podcast_covers
 
 
 def main():
@@ -29,6 +31,7 @@ def main():
     errors = []
     try:
         with patch.object(podcasts, 'fetch_html', side_effect=fetch), patch.object(llm, 'conversation', side_effect=model), \
+                patch.object(podcast_covers, '_official_image', side_effect=lambda *a:Image.new('RGB',(640,640),'navy')), \
                 sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=True, executable_path=os.environ['KANDU_TEST_CHROME'])
             for mobile in [False, True]:
@@ -48,22 +51,26 @@ def main():
                 expect(page.get_by_role('button', name='导入 / 更新最近 50 期', exact=True)).to_be_enabled(timeout=20000)
                 expect(page.locator('.podcast-status')).to_contain_text('已完成')
                 page.get_by_role('button', name='关闭', exact=True).click()
-                expect(page.locator('.book-card')).to_have_count(4)
+                expect(page.locator('.book-card')).to_have_count(2)
                 category = page.get_by_role('combobox', name='按刊物筛选')
                 category.select_option('Lex Fridman Podcast')
-                expect(page.locator('.book-card')).to_have_count(3)
-                expect(page.locator('.cover-link img')).to_have_count(3)
-                expect(page.locator('.cover-link img').first).to_have_attribute('loading','lazy')
-                expect(page.locator('.book-card .count')).to_have_text(['1 篇文章 · 1 篇已有摘要']*3)
-                expect(page.locator('.book-card h3')).to_have_text(['#3 · A conversation','#2 · A conversation','#1 · A conversation'])
-                search = page.get_by_role('searchbox', name='搜索刊物')
-                search.fill('#2')
                 expect(page.locator('.book-card')).to_have_count(1)
-                expect(page.locator('.cover-link img')).to_have_js_property('naturalWidth',480)
+                expect(page.locator('.cover-link img')).to_have_count(1)
+                expect(page.locator('.cover-link img').first).to_have_attribute('loading','lazy')
+                expect(page.locator('.book-card .count')).to_have_text('3 篇文章 · 3 篇已有摘要')
+                expect(page.locator('.book-card h3')).to_have_text('Lex Fridman Podcast')
+                expect(page.locator('.cover-link img')).to_have_js_property('naturalWidth',640)
                 page.locator('.cover-link').click()
-                expect(page.locator('.digest-head h1')).to_have_text('#2 · A conversation')
-                expect(page.get_by_role('link', name='官方 Transcript ↗')).to_have_attribute('href', 'https://lexfridman.com/guest-2-transcript')
+                expect(page.locator('.digest-head h1')).to_have_text('Lex Fridman Podcast')
+                expect(page.get_by_role('link', name='播客官网 ↗')).to_have_attribute('href', 'https://lexfridman.com/podcast/')
+                expect(page.locator('.article-card h2')).to_have_text(['#3 · A conversation','#2 · A conversation','#1 · A conversation'])
+                expect(page.locator('.card-top').first).to_contain_text('2026-11-10')
+                search = page.get_by_role('searchbox', name='搜索文章')
+                search.fill('#2')
+                expect(page.locator('.article-card')).to_have_count(1)
                 expect(page.locator('.article-card p')).to_contain_text('嘉宾讨论科学')
+                page.get_by_role('combobox', name='文章标记').select_option('read')
+                expect(page.locator('.state-pill')).to_have_text('已读')
                 page.locator('.card-bottom a').click()
                 expect(page.locator('.reader-head h1')).to_have_text('#2 · A conversation')
                 expect(page.locator('#para-0 p')).to_contain_text('Guest (00:00:00)')
@@ -72,6 +79,13 @@ def main():
                 if folder := os.environ.get('KANDU_TEST_ARTIFACTS'):
                     target = Path(folder); target.mkdir(parents=True, exist_ok=True)
                     page.screenshot(path=str(target/('podcast-phone.png' if mobile else 'podcast-desktop.png')))
+                page.get_by_role('link', name='← 目录', exact=True).click()
+                expect(page.locator('.digest-head h1')).to_have_text('Lex Fridman Podcast')
+                expect(page.locator('.article-card')).to_have_count(3)
+                expect(page.locator('.article-card').nth(1).locator('.state-pill')).to_have_text('已读')
+                page.get_by_role('button', name='已读 1', exact=True).click()
+                expect(page.locator('.article-card')).to_have_count(1)
+                expect(page.locator('.article-card h2')).to_have_text('#2 · A conversation')
                 context.close()
             browser.close()
         assert not errors, errors

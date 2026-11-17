@@ -26,6 +26,7 @@ from webapp import word_meaning
 from webapp import article_duplicates
 from webapp import podcasts
 from webapp import podcast_covers
+from webapp import podcast_library
 
 STATIC = Path(__file__).parent / 'static'
 BOOK_ID = re.compile(r'[A-Za-z0-9._-]{1,220}\Z')
@@ -121,13 +122,15 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=()):
     def book(book_id):
         if not BOOK_ID.fullmatch(book_id) or book_id in ('.', '..'):
             abort(404, '找不到刊物')
-        meta = store.get_book(book_id)
+        meta = podcast_library.metadata(book_id) or store.get_book(book_id)
         if meta is None:
             abort(404, '找不到刊物')
         return meta
 
     def article(book_id, index):
         meta = book(book_id)
+        if meta.get('sourceType') == 'podcast-series':
+            abort(404, '请从播客目录选择一期节目')
         art = next((a for a in store.ensure_content(meta)['articles'] if a['index'] == index), None)
         if art is None:
             abort(404, '找不到文章')
@@ -265,14 +268,19 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=()):
         counts = article_duplicates.library_counts(library, digests)
         for meta in library:
             publication = meta.get('publication') or re.sub(r'[_ .-]*\d{4}.*$', '', meta['fileName']).replace('_', ' ').strip() or '其他刊物'
-            books.append(dict(id=meta['id'], fileName=meta['fileName'], ext=meta['ext'], publication=publication,
+            card = dict(id=meta['id'], fileName=meta['fileName'], ext=meta['ext'], publication=publication,
                 title=meta.get('title', ''), sourceType=meta.get('sourceType', ''),
                 episodeNumber=meta.get('episodeNumber', 0), publishedAt=meta.get('publishedAt', ''),
                 **counts[meta['id']],
                 cover=store.has_cover(meta['id']) or meta.get('sourceType') == 'podcast',
-                available=Path(meta['path']).is_file()))
+                available=Path(meta['path']).is_file())
+            if not podcast_library.source_id(meta):
+                books.append(card)
             for idx, record in store.load_reading_history(meta['id']).items():
                 recent.append(dict(record, bookId=meta['id'], articleIndex=int(idx), bookTitle=meta.get('title') or meta['fileName']))
+        for source_id in dict.fromkeys(filter(None, (podcast_library.source_id(m) for m in library))):
+            meta = podcast_library.metadata(podcast_library.PREFIX + source_id, library)
+            books.append(podcast_library.card(meta, podcast_library.episodes(source_id, library), digests))
         recent.sort(key=lambda r: r['lastReadAt'], reverse=True)
         return jsonify(books=books, recent=recent[:80])
 
@@ -343,6 +351,8 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=()):
     @app.get('/api/books/<book_id>/cover')
     def cover(book_id):
         meta = book(book_id)
+        if meta.get('sourceType') == 'podcast-series':
+            return send_file(podcast_covers.ensure_series_cover(podcasts.source(meta['sourceId'])), mimetype='image/jpeg')
         if meta.get('sourceType') == 'podcast':
             podcast_covers.ensure_cover(meta)
         path = store.cover_file(meta['id'])
@@ -353,12 +363,18 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=()):
     @app.get('/api/books/<book_id>/file')
     def original_file(book_id):
         meta = book(book_id)
+        if meta.get('sourceType') == 'podcast-series':
+            abort(404, '请进入单期阅读页面下载该期 Transcript')
         return send_file(meta['path'], mimetype='application/pdf' if meta['ext'] == 'pdf' else 'application/epub+zip',
             as_attachment=meta['ext'] != 'pdf', download_name=meta['fileName'], conditional=True)
 
     @app.get('/api/books/<book_id>')
     def digest(book_id):
         meta = book(book_id)
+        if meta.get('sourceType') == 'podcast-series':
+            return jsonify(id=book_id, fileName=meta['fileName'], title=meta['title'], ext=meta['ext'],
+                sourceType=meta['sourceType'], sourceUrl=meta['sourceUrl'], excerpted=True,
+                articles=podcast_library.directory(meta), duplicateCount=0)
         content = store.ensure_content(meta)
         duplicates = article_duplicates.earlier_occurrences(meta, content['articles'])
         summaries = {a['index']: a for a in (store.load_digest(book_id) or {}).get('articles', [])}
@@ -392,6 +408,7 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=()):
         return jsonify(article=art, titleZh=summary.get('titleZh', ''), summaryZh=summary.get('summaryZh', ''),
             bookTitle=meta.get('title') or meta['fileName'], ext=meta['ext'], history=store.load_reading_history(book_id).get(str(index)),
             sourceUrl=meta.get('sourceUrl', ''), excerpted=bool((store.load_digest(book_id) or {}).get('excerpted')),
+            parentBookId=podcast_library.parent_id(meta),
             wordCount=len(gen._TOKEN.findall(' '.join(art['paragraphs']))),
             state=store.load_article_states(book_id).get(str(index), 'unread'))
 
@@ -557,6 +574,22 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=()):
         meta, cfg = book(book_id), model(payload())
         def work(update, control):
             with lock_for(book_id):
+                if meta.get('sourceType') == 'podcast-series':
+                    entries = podcast_library.episodes(meta['sourceId'])
+                    failures = []
+                    for i, episode in enumerate(entries):
+                        control.check()
+                        prefix = f'整期摘要 {i+1}/{len(entries)} · '
+                        update(status=prefix+episode['title'])
+                        try:
+                            with lock_for(episode['id']):
+                                podcasts.generate_digest(episode, cfg,
+                                    lambda **v:update(status=prefix+v.get('status', '')), control)
+                        except (ValueError, llm.LlmError):
+                            failures.append(episode['id'])
+                    if failures:
+                        raise ValueError(f'{len(failures)} 期摘要待补缺，已完成的摘要已保留，可再次重试')
+                    return dict(bookId=book_id)
                 if meta.get('sourceType') == 'podcast':
                     podcasts.generate_digest(meta, cfg, update, control)
                     return dict(failed=0)

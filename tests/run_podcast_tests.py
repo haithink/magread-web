@@ -10,7 +10,7 @@ import zipfile
 from io import BytesIO
 from PIL import Image
 
-from webapp import podcasts
+from webapp import podcasts, podcast_covers, podcast_library
 
 
 def catalog_html(count=55):
@@ -62,6 +62,9 @@ class PodcastTests(unittest.TestCase):
 
     def setUp(self):
         WebTests.setUp(self)
+        self.cover_network = patch.object(podcast_covers, '_official_image', side_effect=ValueError('Offline fixture'))
+        self.cover_network.start()
+        self.addCleanup(self.cover_network.stop)
         root = config.app_dir().resolve()
         assert root.parent.name.startswith('kandu-web-tests-')
         for folder in (root/'cache').glob('lex-fridman-*'):
@@ -149,20 +152,25 @@ class PodcastTests(unittest.TestCase):
             self.assertEqual(result['result']['summaries'], 2)
             self.assertEqual(result['result']['failed'], 0)
             self.assertEqual(model.call_count, 2)
-            books = [b for b in self.client.get('/api/library').json['books'] if b['sourceType']=='podcast']
-            self.assertEqual(len(books), 2)
+            cards = [b for b in self.client.get('/api/library').json['books'] if b['sourceType']=='podcast-series']
+            self.assertEqual(len(cards), 1)
+            series = cards[0]
+            self.assertEqual((series['articleCount'],series['summaryCount']), (2,2))
+            directory = self.client.get('/api/books/'+series['id']).json
+            self.assertEqual([a['episodeNumber'] for a in directory['articles']], [55,54])
+            cover = self.client.get('/api/books/'+series['id']+'/cover')
+            self.assertEqual(cover.status_code, 200)
+            cover.close()
+            books = [b for b in store.load_library() if b.get('sourceType')=='podcast']
             for book in books:
                 self.assertEqual(book['publication'], 'Lex Fridman Podcast')
-                self.assertEqual(book['articleCount'], 1)
-                self.assertEqual(book['summaryCount'], 1)
-                self.assertTrue(book['cover'])
                 cover = self.client.get('/api/books/'+book['id']+'/cover')
                 self.assertEqual(cover.status_code, 200)
                 self.assertEqual(cover.mimetype, 'image/jpeg')
                 with Image.open(BytesIO(cover.data)) as image:
                     self.assertEqual(image.size, (480,640))
                 cover.close()
-                self.assertNotIn('path', book)
+                self.assertNotIn('path', series)
                 article = self.client.get('/api/books/'+book['id']).json
                 self.assertIn('sourceUrl', article)
                 self.assertEqual(len(article['articles']), 1)
@@ -180,7 +188,7 @@ class PodcastTests(unittest.TestCase):
             self.assertEqual(first_cover.stat().st_mtime_ns, original_cover_stat.st_mtime_ns)
             # Existing installations get missing covers through the ordinary cover endpoint.
             first_cover.unlink()
-            self.assertTrue(next(b for b in self.client.get('/api/library').json['books'] if b['id']==books[0]['id'])['cover'])
+            self.assertTrue(next(b for b in self.client.get('/api/library').json['books'] if b['id']==series['id'])['cover'])
             regenerated = self.client.get('/api/books/'+books[0]['id']+'/cover')
             self.assertEqual(regenerated.status_code, 200)
             regenerated.close()
@@ -193,6 +201,70 @@ class PodcastTests(unittest.TestCase):
             self.assertEqual(marked.status_code, 200)
             stats = self.client.get('/api/reading-stats').json
             self.assertIn(books[0]['title'], json.dumps(stats, ensure_ascii=False))
+
+    def test_series_reuses_learning_data_and_episode_identity_after_new_import(self):
+        with patch.object(podcasts, 'fetch_html', side_effect=fake_fetch), patch.object(llm, 'conversation', side_effect=fake_model):
+            result = self.import_fake(2)['result']
+        bid = result['books'][1]
+        sid = podcast_library.PREFIX+'lex-fridman'
+        self.post('/books/'+bid+'/state', dict(articleIndex=0, state='read'))
+        self.post('/books/'+bid+'/articles/0/progress', dict(paragraphIndex=3, paragraphOffset=4))
+        before = self.client.get('/api/books/'+sid).json
+        old = next(a for a in before['articles'] if a['bookId'] == bid)
+        # Adding a higher-numbered episode changes list order, never the link identity.
+        def newer(spec, url, control):
+            if url == spec['url']:
+                return catalog_html(56)
+            return fake_fetch(spec, url, control)
+        with patch.object(podcasts, 'fetch_html', side_effect=newer), patch.object(llm, 'conversation', side_effect=fake_model):
+            self.import_fake(3)
+        after = self.client.get('/api/books/'+sid).json
+        same = next(a for a in after['articles'] if a['bookId'] == bid)
+        self.assertEqual(same['articleIndex'], old['articleIndex'])
+        self.assertEqual(same['summaryZh'], old['summaryZh'])
+        self.assertEqual(same['state'], 'read')
+        self.assertEqual(same['history']['paragraphIndex'], 3)
+        self.assertEqual(same['history']['paragraphOffset'], 4)
+        read = self.client.get('/api/books/'+bid+'/articles/0').json
+        self.assertEqual(read['parentBookId'], sid)
+        recent = self.client.get('/api/library').json['recent']
+        self.assertIn(bid, [r['bookId'] for r in recent])
+        with patch.object(llm, 'conversation', side_effect=AssertionError('Must reuse summaries')):
+            job = self.wait_job(self.post('/books/'+sid+'/generate-digest', {}))
+            self.assertEqual(job['state'], 'done', job)
+
+    def test_official_series_cover_cached_and_offline_fallback_upgraded(self):
+        spec = podcasts.source('lex-fridman')
+        path = store.cover_file(podcast_library.PREFIX+spec['id'])
+        path.unlink(missing_ok=True)
+        path.with_suffix('.source.json').unlink(missing_ok=True)
+        podcast_covers.ensure_series_cover(spec)
+        self.assertFalse(store._json_read(path.with_suffix('.source.json'))['official'])
+        with patch.object(podcast_covers, '_official_image', side_effect=lambda *a:Image.new('RGB',(640,640),'navy')) as fetch:
+            podcast_covers.ensure_series_cover(spec, download=True)
+            self.assertTrue(store._json_read(path.with_suffix('.source.json'))['official'])
+            podcast_covers.ensure_series_cover(spec, download=True)
+            podcast_covers.ensure_series_cover(spec)
+            self.assertEqual(fetch.call_count, 1)
+        with Image.open(path) as cover:
+            self.assertEqual(cover.size, (640,640))
+
+    def test_official_cover_redirect_validation_and_image_decoding(self):
+        spec = podcasts.source('lex-fridman')
+        response = unittest.mock.MagicMock()
+        response.__enter__.return_value = response
+        response.status_code = 302
+        response.headers = {'Location':'https://127.0.0.1/private.jpg'}
+        # Stop only the fixture-level image stub to exercise the real downloader.
+        self.cover_network.stop()
+        with patch.object(podcast_covers.requests, 'get', return_value=response) as get:
+            with self.assertRaises(ValueError):
+                podcast_covers._official_image(spec)
+            self.assertEqual(get.call_count, 1)
+        response.status_code = 200
+        response.iter_content.return_value = [b'<html>Not an image</html>']
+        with patch.object(podcast_covers.requests, 'get', return_value=response), self.assertRaises(OSError):
+            podcast_covers._official_image(spec)
 
     def test_failed_summary_keeps_text_and_retry_only_fills_missing(self):
         with patch.object(podcasts, 'fetch_html', side_effect=fake_fetch), \
@@ -210,14 +282,14 @@ class PodcastTests(unittest.TestCase):
         self.assertEqual(model.call_count, 1)
         self.assertFalse(gen_incomplete(bid))
 
-    def test_manual_podcast_digest_uses_whole_episode_path_and_cache(self):
+    def test_series_digest_fills_missing_whole_episode_and_old_endpoint_reuses_cache(self):
         with patch.object(podcasts, 'fetch_html', side_effect=fake_fetch), \
                 patch.object(llm, 'conversation', side_effect=llm.LlmError('Temporary model error')):
             result = self.import_fake(1)
         bid = result['result']['books'][0]
         with patch('kandu.core_gen.generate_digest', side_effect=AssertionError('Do not summarize intro only')), \
                 patch.object(llm, 'conversation', side_effect=fake_model) as model:
-            manual = self.wait_job(self.post('/books/'+bid+'/generate-digest', {}))
+            manual = self.wait_job(self.post('/books/podcast-series-lex-fridman/generate-digest', {}))
             self.assertEqual(manual['state'], 'done', manual)
             sent = json.loads(model.call_args.args[2][0]['content'])
             self.assertIn('final observations', sent['transcript'])

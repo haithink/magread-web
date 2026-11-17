@@ -18,7 +18,8 @@ from kandu import core_parsers as store, core_prompts
 from webapp import podcast_covers
 
 SOURCES = {'lex-fridman': dict(id='lex-fridman', name='Lex Fridman Podcast',
-    url='https://lexfridman.com/podcast/', host='lexfridman.com', limit=50)}
+    url='https://lexfridman.com/podcast/', host='lexfridman.com', limit=50,
+    coverUrl='https://lexfridman.com/wordpress/wp-content/uploads/powerpress/lex_fridman_podcast_cover_3000.jpg')}
 SUMMARY_METHOD = 'whole-transcript-excerpts-v1'
 
 
@@ -259,6 +260,8 @@ def import_source(source_id, limit, cfg, update, control, data_lock=None, lock_f
         progress('正在读取官网全部节目目录')
         episodes = catalog(spec, fetch_html(spec, spec['url'], control), limit)
         report['total'] = len(episodes)
+        progress('正在准备播客系列封面')
+        podcast_covers.ensure_series_cover(spec, download=True, control=control)
         ready = []
         for i, episode in enumerate(episodes):
             control.check()
@@ -287,7 +290,6 @@ def import_source(source_id, limit, cfg, update, control, data_lock=None, lock_f
                         entries = [e for e in entries if e['id'] != meta['id']]
                         store._atomic_json_write(store.library_file(), entries+[meta])
                     report['imported'] += 1
-                podcast_covers.ensure_cover(meta)
                 ready.append(meta)
                 report['books'].append(meta['id'])
             except llm.RequestCancelled:
