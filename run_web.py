@@ -15,6 +15,7 @@ def main():
     parser.add_argument('--import-desktop', type=Path, help='One-time import; original book files stay in place')
     parser.add_argument('--allowed-host', action='append', default=[], help='Additional hostname, e.g. read.example.com')
     parser.add_argument('--https-host', action='append', default=[], help='Additional HTTPS hostname with Secure cookies; keeps local HTTP login working')
+    parser.add_argument('--cloudflare-host', action='append', default=[], help='HTTPS hostname served by local cloudflared; trust CF-Connecting-IP only on loopback for this host')
     parser.add_argument('--secure-cookie', action='store_true', help='Enable for HTTPS behind a trusted tunnel')
     args = parser.parse_args()
     desktop = Path(os.environ.get('KANDU_DATA_DIR') or base / 'KanduDesktop').resolve()
@@ -30,7 +31,8 @@ def main():
     os.environ['KANDU_DATA_DIR'] = str(args.data_dir.resolve())
     from webapp.server import create_app
     from waitress import serve
-    app = create_app(allowed_hosts=args.allowed_host, secure_cookie=args.secure_cookie, https_hosts=args.https_host)
+    app = create_app(allowed_hosts=args.allowed_host, secure_cookie=args.secure_cookie, https_hosts=args.https_host,
+                     cloudflare_hosts=args.cloudflare_host)
     print(f'Kandu Web: http://127.0.0.1:{args.port}', flush=True)
     for address in sorted({r[4][0] for r in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)}):
         print(f'LAN address: http://{address}:{args.port}', flush=True)

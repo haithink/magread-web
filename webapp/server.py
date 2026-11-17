@@ -9,6 +9,7 @@ import re
 import secrets
 import shutil
 import socket
+import sqlite3
 import threading
 import time
 from urllib.parse import urlsplit
@@ -28,6 +29,7 @@ from webapp import article_duplicates
 from webapp import podcasts
 from webapp import podcast_covers
 from webapp import podcast_library
+from webapp.login_security import ClientAddressError, LoginLimiter, login_address
 
 STATIC = Path(__file__).parent / 'static'
 BOOK_ID = re.compile(r'[A-Za-z0-9._-]{1,220}\Z')
@@ -95,7 +97,7 @@ class HostCookieSessionInterface(SecureCookieSessionInterface):
         return super().get_cookie_secure(app) or hostname.lower() in app.config['HTTPS_HOSTS']
 
 
-def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=()):
+def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare_hosts=()):
     root = config.app_dir()
     auth_file = root / 'web-auth.json'
     if not auth_file.exists():
@@ -107,7 +109,8 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=()):
     app.config.update(SECRET_KEY=auth['secret'], MAX_CONTENT_LENGTH=150 * 1024**2,
                       SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE='Strict',
                       SESSION_COOKIE_SECURE=secure_cookie, SESSION_COOKIE_NAME='kandu_web',
-                      HTTPS_HOSTS=frozenset(h.lower() for h in https_hosts),
+                      HTTPS_HOSTS=frozenset(h.lower() for h in (*https_hosts, *cloudflare_hosts)),
+                      CLOUDFLARE_HOSTS=frozenset(h.lower() for h in cloudflare_hosts),
                       PERMANENT_SESSION_LIFETIME=timedelta(days=30))
     app.session_interface = HostCookieSessionInterface()
     hosts = {'localhost', '127.0.0.1', '::1', socket.gethostname().lower(), *[h.lower() for h in allowed_hosts]}
@@ -116,7 +119,9 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=()):
     jobs = Jobs()
     app.extensions['jobs'] = jobs
     data_lock = threading.RLock()
-    book_locks, rate = {}, {}
+    book_locks = {}
+    login_limiter = LoginLimiter(root / 'login-rate.sqlite3', auth['secret'])
+    password_slots = threading.BoundedSemaphore(2)
     podcast_jobs = {}
     started = time.time()
 
@@ -236,21 +241,32 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=()):
 
     @app.post('/api/login')
     def login():
-        data = payload()
-        address = request.remote_addr or 'unknown'
-        now = time.time()
-        with data_lock:
-            recent = [t for t in rate.get(address, []) if now - t < 600]
-            if len(recent) >= 10:
-                abort(429, '尝试次数过多，请十分钟后再试')
-            if len(rate) > 1024:
-                rate.clear()
-            rate[address] = recent + [now]
-        password = data.get('password', '')
-        if not isinstance(password, str) or len(password) > 200 or not check_password_hash(auth['passwordHash'], password):
-            abort(401, '访问密码不正确')
-        with data_lock:
-            rate.pop(address, None)
+        request.max_content_length = 8 * 1024
+        if request.content_length is not None and request.content_length > request.max_content_length:
+            abort(413, '登录请求过大')
+        try:
+            address = login_address(request.remote_addr or '', urlsplit(request.host_url).hostname or '',
+                                    app.config['CLOUDFLARE_HOSTS'], request.headers.get('CF-Connecting-IP', ''))
+        except ClientAddressError as error:
+            abort(400, str(error))
+        # Bound expensive password hashing without a global failure counter
+        # that could lock every visitor out. Existing sessions bypass login.
+        if not password_slots.acquire(blocking=False):
+            return jsonify(error='登录验证繁忙，请稍后重试', retryAfter=2), 503, {'Retry-After': '2'}
+        try:
+            try:
+                ticket, retry = login_limiter.reserve(address)
+                if retry:
+                    return jsonify(error=f'此网络登录尝试过多，请 {retry} 秒后再试', retryAfter=retry), 429, {'Retry-After': str(retry)}
+                data = payload()
+                password = data.get('password', '')
+                if not isinstance(password, str) or len(password) > 200 or not check_password_hash(auth['passwordHash'], password):
+                    abort(401, '访问密码不正确')
+                login_limiter.success(address, ticket)
+            except sqlite3.Error:
+                return jsonify(error='登录防护暂时不可用，请稍后重试', retryAfter=2), 503, {'Retry-After': '2'}
+        finally:
+            password_slots.release()
         session.clear()
         session.update(authenticated=True, csrf=secrets.token_urlsafe(24))
         session.permanent = True

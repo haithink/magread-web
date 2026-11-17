@@ -19,6 +19,7 @@ try {
         $arguments = @('-B', '-u', ('"' + (Join-Path $repo 'run_web.py') + '"'), '--data-dir', ('"' + $data + '"'))
         foreach ($hostname in $launch.allowedHosts) { $arguments += @('--allowed-host', [string]$hostname) }
         foreach ($hostname in $launch.httpsHosts) { $arguments += @('--https-host', [string]$hostname) }
+        foreach ($hostname in $launch.cloudflareHosts) { $arguments += @('--cloudflare-host', [string]$hostname) }
         if ($launch.secureCookie -eq $true) { $arguments += '--secure-cookie' }
         $process = Start-Process -FilePath $python -ArgumentList $arguments -WorkingDirectory $repo -WindowStyle Hidden -PassThru `
             -RedirectStandardOutput (Join-Path $runtime 'web-server.log') -RedirectStandardError (Join-Path $runtime 'web-server-error.log')

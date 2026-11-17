@@ -133,6 +133,7 @@ http://服务器局域网IP:8766
 | 首次生成的访问密码 | `%LOCALAPPDATA%\KanduWeb\access-code.txt` |
 | 会话签名和密码哈希 | `%LOCALAPPDATA%\KanduWeb\web-auth.json` |
 | 阅读计时及每日活动数据 | `%LOCALAPPDATA%\KanduWeb\reading-activity.sqlite3` |
+| 登录限流记录（地址的带密钥摘要、时间，无明文 IP） | `%LOCALAPPDATA%\KanduWeb\login-rate.sqlite3` |
 | 刊物、缓存、生词本、阅读记录与讨论 | `%LOCALAPPDATA%\KanduWeb` 下各子目录 |
 | Python 环境与运行日志 | `%LOCALAPPDATA%\KanduWebRuntime` |
 
@@ -159,15 +160,17 @@ http://服务器局域网IP:8766
 可以通过 Cloudflare Tunnel 连接自有域名。以下仅为 HTTPS 隧道后的启动参数示例，不会创建隧道或修改 DNS：
 
 ```bash
-python run_web.py --host 127.0.0.1 --allowed-host read.example.com --secure-cookie
+python run_web.py --host 127.0.0.1 --cloudflare-host read.example.com
 ```
 
-如果还要保留局域网 HTTP 登录，可改用 `python run_web.py --https-host read.example.com`：该域名自动加入白名单并使用 Secure 登录 Cookie，本机和局域网地址继续使用原来的 Cookie 设置。
+对于其他 HTTPS 代理，可使用 `python run_web.py --https-host read.example.com`：该域名自动加入白名单并使用 Secure 登录 Cookie，本机和局域网地址继续使用原来的 Cookie 设置，但不信任代理地址头。
+
+对于本机 Cloudflare Tunnel，使用 `--cloudflare-host read.example.com`：包含该域名的 HTTPS Cookie 和白名单设置，并仅在该域名且连接来自本机回环地址时信任 `CF-Connecting-IP`。需要局域网访问时保留默认 `--host 0.0.0.0`。其他反向代理不能直接套用此参数；不要把客户端可随意填写的 `X-Forwarded-For` 当作真实 IP。该模式要求本机进程可信，并且隧道保留原 Host、连接到回环地址，不接受从局域网直连公网 Host 的登录。
 
 Windows 启动器可读取仓库外的 `%LOCALAPPDATA%\KanduWebRuntime\web-launch.json`，例如：
 
 ```json
-{"httpsHosts": ["read.example.com"], "publicUrl": "https://read.example.com"}
+{"cloudflareHosts": ["read.example.com"], "publicUrl": "https://read.example.com"}
 ```
 
 修改配置后需重启 Web 进程。未配置此文件时仍使用原来的局域网模式。`tools/start_web.ps1 -NoBrowser` 仅启动后台 Web 服务，不打开浏览器或输出访问密码。
@@ -176,6 +179,8 @@ Windows 启动器可读取仓库外的 `%LOCALAPPDATA%\KanduWebRuntime\web-launc
 
 Web 登录密码、HttpOnly/SameSite 会话、CSRF、请求来源与访问主机名校验默认启用。浏览器使用纯文本节点显示用户和模型内容，不执行返回的 HTML。
 
+登录接口按真实访客 IP 实行 10 分钟滑动窗口，最多 10 次尝试；IPv6 同一 `/64` 网段合并，同一公网出口的多台设备共用额度。限流返回 HTTP 429、`Retry-After` 和剩余秒数，被拒请求不延长等待时间；成功登录清除该地址更早的尝试。记录存到仓库外的 `login-rate.sqlite3`，重启不清零，过期记录在后续登录请求时清理。登录 JSON 限制 8 KiB，同时最多进行两次密码校验，繁忙时返回 503；已登录的阅读和其他访客的限流计数不受影响。这些措施降低撞密码和密码哈希计算滥用风险，不能替代网络层防护，也不能保证分布式攻击时服务始终可用；Web 服务器仍保留书籍上传需要的较大请求体传输上限。
+
 需要在另一台 Windows 电脑继续使用同一域名时，参阅 [同域名主机迁移流程](docs/HOST_MIGRATION.md)：包含旧机停服与备份、全部阅读数据及原刊迁移、绝对路径修正、隧道凭据复用、新机验证、登录启动项和失败回退。当前需要手动切换，同一时刻只让一台主机提供服务。
 
 ## 测试与开发
@@ -183,6 +188,7 @@ Web 登录密码、HttpOnly/SameSite 会话、CSRF、请求来源与访问主机
 ```bash
 python -m pip install -r requirements-dev.txt
 python tests/run_web_tests.py
+python tests/run_login_security_tests.py
 python tests/run_reading_stats_tests.py
 python tests/run_article_duplicate_tests.py
 python tests/run_podcast_tests.py

@@ -90,7 +90,7 @@ Get-NetTCPConnection -LocalPort 8766 -State Listen -ErrorAction SilentlyContinue
 | 数据目录中的 `books.json` | 每本书的 `path`，改为新机上对应原刊的实际绝对路径 |
 | 数据目录中的 `settings.json` | 非空的 `booksDir`、`libraryDir`，指向新机正确目录 |
 | `cloudflared\config.yml` | `credentials-file`，改为新机凭据 JSON 的绝对路径 |
-| `web-launch.json` | `httpsHosts` 和 `publicUrl`，保持原来的公网域名 |
+| `web-launch.json` | 本机隧道使用 `cloudflareHosts` 和 `publicUrl`，保持原来的公网域名；旧的 `httpsHosts` 仅设置 HTTPS Cookie |
 | Windows 登录启动项 | 更新为新机源码目录中的脚本路径 |
 
 例如把书籍路径 `I:\KanduLibrary\sample.epub` 改为 `D:\KanduLibrary\sample.epub`，JSON 内写作 `"path": "D:\\KanduLibrary\\sample.epub"`。可在文本编辑器中批量替换确认过的书库路径前缀，但不要修改书籍 `id`、文章编号或缓存文件名。不要删掉旧条目后重新上传来代替路径修正，否则可能失去原记录的对应关系。
@@ -116,7 +116,7 @@ foreach ($book in $books) {
 `web-launch.json` 示例：
 
 ```json
-{"httpsHosts": ["read.example.com"], "publicUrl": "https://read.example.com"}
+{"cloudflareHosts": ["read.example.com"], "publicUrl": "https://read.example.com"}
 ```
 
 `config.yml` 示例（尖括号内容必须替换；UUID 和凭据沿用旧机，凭据存放路径按新机实际填写）：
@@ -133,7 +133,9 @@ ingress:
   - service: http_status:404
 ```
 
-如果示例中的端口被其他程序占用，先查明用途，再同步调整相关配置。不要通过 HTTP Host 改写绕过刊读的域名白名单；`httpsHosts` 会为该域名启用 Secure 会话 Cookie，同时保留本机和局域网 HTTP 登录。
+如果示例中的端口被其他程序占用，先查明用途，再同步调整相关配置。不要通过 HTTP Host 改写绕过刊读的域名白名单；`cloudflareHosts` 会为该域名启用 Secure 会话 Cookie，同时保留本机和局域网 HTTP 登录，并仅信任本机回环连接提供的 Cloudflare 访客地址。迁移时可把旧配置中的该域名从 `httpsHosts` 移到 `cloudflareHosts`，重启后生效；其他代理不能直接使用此模式。
+
+登录限流数据也保存在应用数据目录的 `login-rate.sqlite3`，随数据目录复制即可延续剩余等待时间。它不包含明文 IP 或密码；不要为了绕过登录限制而删除此文件。
 
 在新机 PowerShell 中验证配置（此命令不启动连接）：
 
