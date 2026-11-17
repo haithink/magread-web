@@ -12,7 +12,7 @@ const el = (tag, attrs = {}, ...children) => {
   return node;
 };
 const button = (text, callback, cls = '') => el('button', {type:'button', class:cls, onclick:callback}, text);
-const state = {csrf:'', route:0, reader:null, selection:null, activeJobs:new Map(), sheet:0};
+const state = {csrf:'', route:0, reader:null, selection:null, activeJobs:new Map(), jobObservers:new Map(), sheet:0};
 const view = $('#app');
 // Older installed reading extensions also listen on document. Keep our reader and
 // dialog mouse events local so one gesture cannot start another model request.
@@ -80,24 +80,31 @@ function displayJobBar() {
 }
 async function runJob(path, data={}, onDone, onUpdate) {
   const {jobId}=await api(path,{method:'POST',data});
-  if(state.activeJobs.has(jobId)) { toast('这个任务已经在进行中'); return jobId; }
+  if(state.activeJobs.has(jobId)) {toast('这个任务已经在进行中');return jobId;}
+  return watchJob(jobId,onDone,onUpdate);
+}
+function watchJob(jobId,onDone,onUpdate) {
+  if(!state.jobObservers.has(jobId))state.jobObservers.set(jobId,[]);
+  state.jobObservers.get(jobId).push({onDone,onUpdate});
+  if(state.activeJobs.has(jobId))return jobId;
   const started=Date.now(); state.activeJobs.set(jobId,{status:'任务已提交'}); displayJobBar();
   const poll=async()=>{
     try {
       const job=await api('/jobs/'+jobId);
       const elapsed=Math.round((Date.now()-started)/1000);
       state.activeJobs.set(jobId,{status:`${job.status} · ${elapsed} 秒`}); displayJobBar();
-      if(onUpdate) onUpdate(job);
+      for(const observer of state.jobObservers.get(jobId)||[])if(observer.onUpdate)observer.onUpdate(job);
       if(job.state==='done'||job.state==='stopped'||job.state==='error') {
         state.activeJobs.delete(jobId); displayJobBar();
         if(job.state==='error') toast(job.error);
         else if(job.state==='done') toast(job.result?.failed?'部分完成，可再次补缺':'已完成并保存');
-        if(onDone) await onDone(job);
+        const observers=state.jobObservers.get(jobId)||[];state.jobObservers.delete(jobId);
+        for(const observer of observers)if(observer.onDone)await observer.onDone(job);
         return;
       }
       setTimeout(poll,650);
     } catch(error) {
-      state.activeJobs.delete(jobId); displayJobBar(); toast('连接中断，服务器任务仍会保存结果。'+error.message);
+      state.activeJobs.delete(jobId);state.jobObservers.delete(jobId); displayJobBar(); toast('连接中断，服务器任务仍会保存结果。'+error.message);
     }
   };
   poll(); return jobId;
@@ -107,6 +114,7 @@ async function library(token) {
   const [data,stats]=await Promise.all([api('/library'),api('/reading-stats')]); if(token!==state.route)return;
   const content=el('div');
   content.append(heading('A WINDOW TO THE WORLD','我的阅读室',`${data.books.length} 本刊物 · 阅读结果集中保存，各设备接续阅读`,[
+    button('刊物来源',action(podcastSheet)),
     button('＋ 添加刊物',uploadSheet,'primary')
   ]));
   content.append(el('a',{class:'reading-milestone',href:'#/reading-stats'},
@@ -136,20 +144,22 @@ async function library(token) {
   const result=el('div');
   function renderBooks() {
     const q=search.value.trim().toLowerCase();
-    const filtered=data.books.filter(b=>b.fileName.toLowerCase().includes(q)&&(!select.value||b.publication===select.value));
+    const filtered=data.books.filter(b=>(b.fileName+' '+(b.title||'')).toLowerCase().includes(q)&&(!select.value||b.publication===select.value));
     const groups=new Map(); filtered.forEach(b=>{if(!groups.has(b.publication))groups.set(b.publication,[]);groups.get(b.publication).push(b);});
     result.replaceChildren();
     if(!filtered.length) result.append(empty(data.books.length?'没有匹配的刊物':'从一本刊物开始','添加 EPUB 或 PDF，已有摘要和词表会自动复用。'));
     for(const [name,books] of groups) {
-      books.sort((a,b)=>b.fileName.localeCompare(a.fileName,undefined,{numeric:true}));
+      books.sort((a,b)=>a.sourceType==='podcast'&&b.sourceType==='podcast'?b.episodeNumber-a.episodeNumber:b.fileName.localeCompare(a.fileName,undefined,{numeric:true}));
       const grid=el('div',{class:'book-grid'});
       for(const book of books) {
-        const cover=book.cover?el('img',{src:`/api/books/${encodeURIComponent(book.id)}/cover`,alt:book.fileName,loading:'lazy'}):el('span',{class:'cover-placeholder'},name);
+        const isPodcast=book.sourceType==='podcast';
+        const cover=book.cover?el('img',{src:`/api/books/${encodeURIComponent(book.id)}/cover`,alt:book.title||book.fileName,loading:'lazy'}):isPodcast?
+          el('span',{class:'podcast-cover'},el('small',{},name.replace(/ Podcast$/i,'').toUpperCase()),el('strong',{},'#'+book.episodeNumber),el('span',{},'PODCAST'),el('small',{},book.publishedAt||'TRANSCRIPT')):el('span',{class:'cover-placeholder'},name);
         const articleCount=book.articleCountKnown?`${book.articleCount} 篇文章`:'待解析文章';
         const summaryCount=book.articleCountKnown&&book.articleCount===0?'本期均为重复文章':book.summaryCount?`${book.summaryCount} 篇已有摘要`:'待生成摘要';
         grid.append(el('article',{class:'book-card'},el('a',{class:'cover-link',href:`#/book/${encodeURIComponent(book.id)}`},cover,
-          el('span',{class:'format-tag'},book.ext.toUpperCase())),
-          el('h3',{},el('a',{href:`#/book/${encodeURIComponent(book.id)}`},book.fileName.replace(/\.(epub|pdf)$/i,''))),
+          el('span',{class:'format-tag'},isPodcast?'TRANSCRIPT':book.ext.toUpperCase())),
+          el('h3',{},el('a',{href:`#/book/${encodeURIComponent(book.id)}`},book.title||book.fileName.replace(/\.(epub|pdf)$/i,''))),
           el('div',{class:'count'},book.available?`${articleCount} · ${summaryCount}`:'原文件暂不可用')));
       }
       result.append(el('section',{class:'library-section'},el('div',{class:'section-title'},el('h2',{},name),el('span',{class:'count'},`${books.length} 本`)),grid));
@@ -157,6 +167,46 @@ async function library(token) {
   }
   search.oninput=renderBooks;select.onchange=renderBooks;
   content.append(el('div',{class:'filters'},search,select),result);view.replaceChildren(content);renderBooks();
+}
+
+async function podcastSheet() {
+  const data=await api('/podcast-sources');
+  const body=el('div',{class:'form-stack'},el('p',{class:'muted'},'从官方网站导入文字 Transcript，每期作为一本书。自动使用默认 LLM 生成中文摘要，暂不生成生词表；再次导入会跳过已有内容并补缺。'));
+  const sheet=showSheet('刊物来源 · Podcast',body);
+  for(const source of data.sources) {
+    let jobId=source.jobId;
+    const status=el('p',{class:'podcast-status','aria-live':'polite'},source.status.status||'尚未导入');
+    const progress=el('progress',{max:source.limit*2,value:0,'aria-label':'Podcast 导入进度'});
+    const failures=el('div',{class:'podcast-failures'});
+    const render=job=>{
+      if(sheet!==state.sheet)return;
+      const result=job.result||source.status;
+      status.textContent=(job.state==='done'?result.status:'')||job.status||result.status||'准备中';
+      stop.disabled=!['queued','running'].includes(job.state||result.state);
+      progress.max=Math.max(1,(result.total||source.limit)*2);
+      progress.value=(result.imported||0)+(result.existing||0)+(result.summaries||0)+(result.failures||[]).length;
+      failures.replaceChildren(...(result.failures||[]).map(f=>el('p',{},`${f.stage==='summary'?'摘要':'Transcript'}待补缺：${f.title}`)));
+    };
+    const done=async job=>{if(sheet!==state.sheet)return;render(job);start.disabled=false;if(location.hash==='#/library'||!location.hash)await library(state.route);};
+    const stop=button('停止导入',action(async()=>{
+      if(jobId)await api(`/jobs/${encodeURIComponent(jobId)}/stop`,{method:'POST',data:{}});
+      stop.disabled=true;
+    }));
+    stop.disabled=true;
+    const start=button(`导入 / 更新最近 ${source.limit} 期`,action(async()=>{
+      start.disabled=true;
+      try{jobId=await runJob(`/podcast-sources/${encodeURIComponent(source.id)}/import`,{limit:source.limit},done,render);}
+      catch(error){start.disabled=false;throw error;}
+    }),'primary');
+    const running=['queued','running'].includes(source.status.state);
+    start.disabled=running;
+    body.append(el('section',{class:'podcast-source'},el('h3',{},source.name),
+      el('a',{href:source.url,target:'_blank',rel:'noopener noreferrer',class:'duplicate-source'},'官方网站 ↗'),
+      el('p',{class:'count'},'只保存文字，不下载音频、视频或封面。长篇摘要采用覆盖全文的分段摘录。'),
+      status,progress,failures,el('div',{class:'row'},start,stop)));
+    if(running&&source.jobId)watchJob(source.jobId,done,render);
+    render({status:source.status.status,result:source.status});
+  }
 }
 
 function uploadSheet() {
@@ -229,9 +279,11 @@ async function digestPage(bookId,token) {
   }
   q.oninput=render;showDuplicates.onchange=render;
   view.replaceChildren(el('a',{href:'#/library',class:'back'},'← 我的书库'),
-    el('div',{class:'digest-head'},heading('ISSUE CONTENTS',data.fileName.replace(/\.(epub|pdf)$/i,''),issueCount,[
+    el('div',{class:'digest-head'},heading('ISSUE CONTENTS',data.title||data.fileName.replace(/\.(epub|pdf)$/i,''),issueCount,[
       button('生成 / 补缺摘要',action(()=>runJob(`/books/${encodeURIComponent(bookId)}/generate-digest`,{},()=>{if(token===state.route)route();})),'primary')
-    ])),el('div',{class:'filters'},q,duplicateCount?el('label',{class:'duplicate-toggle'},showDuplicates,`显示重复文章（${duplicateCount}）`):null),tabs,el('div',{class:'filters'}),grid);
+    ])),data.sourceUrl?el('div',{class:'podcast-provenance'},el('a',{href:data.sourceUrl,target:'_blank',rel:'noopener noreferrer'},'官方 Transcript ↗'),
+      data.excerpted?el('span',{class:'count'},'摘要基于覆盖全文的分段摘录；正文为完整 Transcript。'):null):null,
+    el('div',{class:'filters'},q,duplicateCount?el('label',{class:'duplicate-toggle'},showDuplicates,`显示重复文章（${duplicateCount}）`):null),tabs,el('div',{class:'filters'}),grid);
   render();
 }
 
@@ -356,7 +408,8 @@ async function readerPage(bookId,index,token,startParagraph=null) {
     el('h1',{},data.article.title),data.titleZh?el('h2',{},data.titleZh):null,
     el('div',{class:'reader-meta'},el('span',{},`${data.wordCount.toLocaleString()} 词`),el('span',{},`约 ${Math.max(1,Math.ceil(data.wordCount/220))} 分钟`),
       el('span',{},`${data.article.paragraphs.length} 段`)),
-    data.summaryZh?el('details',{class:'reader-summary'},el('summary',{},'文章摘要'),el('p',{},data.summaryZh)):null),selection,body);
+    data.sourceUrl?el('a',{class:'duplicate-source',href:data.sourceUrl,target:'_blank',rel:'noopener noreferrer'},'官方 Transcript ↗'):null,
+    data.summaryZh?el('details',{class:'reader-summary'},el('summary',{},data.excerpted?'整期摘要 · 全文分段摘录':'文章摘要'),el('p',{},data.summaryZh)):null),selection,body);
   view.replaceChildren(article);window.scrollTo(0,0);
   document.addEventListener('selectionchange',reader.selectionHandler=()=>{if(state.reader===reader)selectionBar(reader);});
   window.addEventListener('resize',reader.selectionResize=()=>positionSelectionBar(reader));

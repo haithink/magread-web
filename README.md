@@ -7,6 +7,7 @@
 ## 功能
 
 - EPUB/PDF 上传、封面与刊物分类、最近阅读及继续阅读。
+- Podcast 文字来源：导入 Lex Fridman Podcast 最近 50 期官方 Transcript，每期独立入库并自动生成中文摘要，不自动生成生词表。
 - 文章摘要与搜索，未读、已读、不感兴趣标记。
 - 文章目录默认隐藏更早刊物已收录的同标题文章，可展开重复文章并跳转到更早出处。
 - 全局已读清单、去重文章数和累计阅读词数，显示标题、词数、完成时间和所有出处，支持搜索及回到原文。
@@ -15,6 +16,22 @@
 - 就近选词工具条、查词自动收藏及 LLM 本文含义解释；个人生词本查询与编辑、句子讲解，展示最近来源、原文片段与本文用法，点击文章可回到来源段落。
 - 按文章保存多轮 AI 讨论，显示生成进度，支持停止讨论回答。
 - 粘贴完整模型配置 JSON，编辑已有模型的接口地址、模型名等配置，选择默认模型与已掌握的词汇级别；编辑时密钥留空保留原值。
+
+## Podcast Transcript 来源
+
+在首页点击「刊物来源」，选择「导入 / 更新最近 50 期」。使用已配置的默认 LLM 自动生成摘要；文字抓取和摘要任务在服务器后台执行，界面显示阶段进度。关闭页面不会停止任务，重新打开「刊物来源」可查看当前任务。服务重启会中断任务，再次导入可复用已入库的 Transcript 和已有摘要，仅补缺，不覆盖阅读记录。
+
+当前支持 **Lex Fridman Podcast**。从官网「All Episodes」列表由新到旧选择最近 50 份可用 Transcript，跳过没有文字稿的节目，避免首页精选区重复；每期完整对话保存为仅含文字的压缩 EPUB，包含嘉宾、时间戳和章节标题，不下载音频、视频、图片或封面。书库分类固定为「Lex Fridman Podcast」，节目按编号排序，可以按标题搜索。目录和阅读页均保留官方 Transcript 出处链接。
+
+短篇摘要使用完整文字，长篇摘要使用按全文位置均匀抽取的 24 段文字（合计最多 32,000 字符）及章节目录，兼顾前中后段内容，控制输入开销；界面注明「全文分段摘录」。摘要不代表逐句核实整期内容，全文始终可阅读、查词和提问。摘要调用你设置的模型服务并按其规则计费，导入不会自动生成生词表。个别页面或摘要失败不会阻止后续节目，来源窗口列出待补缺节目；可再次导入，或在单期目录中补缺摘要。
+
+默认保存位置（均在源码仓库外）：
+
+- 文字电子书：`%LOCALAPPDATA%\KanduWeb\books\podcasts\lex-fridman\`。
+- 正文索引、章节元数据及摘要：`%LOCALAPPDATA%\KanduWeb\cache\<节目ID>\`。
+- 导入状态：`%LOCALAPPDATA%\KanduWeb\podcasts\lex-fridman.json`，书库登记仍在 `books.json`。
+
+自定义数据目录时以上路径随数据目录移动。迁移时保留整个应用数据目录并按主机迁移文档修正书库绝对路径；无需迁移视频文件。源码仓库仅包含导入功能，不发布节目文字稿或个人摘要。新增其他 Podcast 可在 `webapp/podcasts.py` 中扩展来源与解析规则，目前接口仅接受内置官方来源。
 
 ## 文章目录去重
 
@@ -150,12 +167,14 @@ python -m pip install -r requirements-dev.txt
 python tests/run_web_tests.py
 python tests/run_reading_stats_tests.py
 python tests/run_article_duplicate_tests.py
+python tests/run_podcast_tests.py
 python tests/run_word_meaning_tests.py
 python tests/run_phrase_tests.py
 python tests/run_privacy_tests.py
 python -m playwright install chromium
 python tests/run_web_browser_tests.py
 python tests/run_article_duplicate_browser_tests.py
+python tests/run_podcast_browser_tests.py
 python tests/run_lookup_browser_tests.py
 python tests/run_phrase_browser_tests.py
 python tools/check_public_files.py

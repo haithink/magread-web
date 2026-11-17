@@ -24,6 +24,7 @@ from webapp import __version__
 from webapp import reading_stats
 from webapp import word_meaning
 from webapp import article_duplicates
+from webapp import podcasts
 
 STATIC = Path(__file__).parent / 'static'
 BOOK_ID = re.compile(r'[A-Za-z0-9._-]{1,220}\Z')
@@ -113,6 +114,7 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=()):
     app.extensions['jobs'] = jobs
     data_lock = threading.RLock()
     book_locks, rate = {}, {}
+    podcast_jobs = {}
     started = time.time()
 
     def book(book_id):
@@ -134,7 +136,7 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=()):
         if paragraph is not None and (type(paragraph) is not int or not -1 <= paragraph < len(art['paragraphs'])):
             abort(400, '段落编号无效')
         context = art['title'] if paragraph == -1 else art['paragraphs'][paragraph] if paragraph is not None else ''
-        return dict(bookId=meta['id'], bookTitle=meta['fileName'], articleIndex=art['index'],
+        return dict(bookId=meta['id'], bookTitle=meta.get('title') or meta['fileName'], articleIndex=art['index'],
             articleTitle=art['title'], paragraph=paragraph, context=context[:800], recordedAt=int(time.time() * 1000))
 
     def payload():
@@ -261,14 +263,50 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=()):
         digests = {meta['id']: store.load_digest(meta['id']) or {} for meta in library}
         counts = article_duplicates.library_counts(library, digests)
         for meta in library:
-            publication = re.sub(r'[_ .-]*\d{4}.*$', '', meta['fileName']).replace('_', ' ').strip() or '其他刊物'
+            publication = meta.get('publication') or re.sub(r'[_ .-]*\d{4}.*$', '', meta['fileName']).replace('_', ' ').strip() or '其他刊物'
             books.append(dict(id=meta['id'], fileName=meta['fileName'], ext=meta['ext'], publication=publication,
+                title=meta.get('title', ''), sourceType=meta.get('sourceType', ''),
+                episodeNumber=meta.get('episodeNumber', 0), publishedAt=meta.get('publishedAt', ''),
                 **counts[meta['id']],
                 cover=store.has_cover(meta['id']), available=Path(meta['path']).is_file()))
             for idx, record in store.load_reading_history(meta['id']).items():
-                recent.append(dict(record, bookId=meta['id'], articleIndex=int(idx), bookTitle=meta['fileName']))
+                recent.append(dict(record, bookId=meta['id'], articleIndex=int(idx), bookTitle=meta.get('title') or meta['fileName']))
         recent.sort(key=lambda r: r['lastReadAt'], reverse=True)
         return jsonify(books=books, recent=recent[:80])
+
+    @app.get('/api/podcast-sources')
+    def podcast_sources():
+        items = []
+        with data_lock:
+            for spec in podcasts.SOURCES.values():
+                saved = podcasts.status(spec['id'])
+                job_id = podcast_jobs.get(spec['id'])
+                if job_id and job_id not in jobs.items:
+                    podcast_jobs.pop(spec['id'], None)
+                    job_id = None
+                if job_id:
+                    job = jobs.public(job_id)
+                    saved = dict(saved, state=job['state'], status=job['status']
+                        if job['state'] in ('queued', 'running') else saved.get('status') or job['status'])
+                elif saved.get('state') == 'running':
+                    saved = dict(saved, state='interrupted', status='上次导入已中断，再次导入可补缺')
+                items.append(dict(id=spec['id'], name=spec['name'], url=spec['url'], limit=spec['limit'],
+                    status=saved, jobId=job_id))
+        return jsonify(sources=items)
+
+    @app.post('/api/podcast-sources/<source_id>/import')
+    def import_podcast(source_id):
+        spec, data = podcasts.source(source_id), payload()
+        limit = data.get('limit', spec['limit'])
+        if type(limit) is not int or not 1 <= limit <= spec['limit']:
+            abort(400, '导入期数应为 1 至 50 的整数')
+        cfg = model(data)
+        def work(update, control):
+            return podcasts.import_source(source_id, limit, cfg, update, control, data_lock, lock_for)
+        with data_lock:
+            job_id = jobs.submit(('podcast', source_id), work)
+            podcast_jobs[source_id] = job_id
+        return accepted(job_id)
 
     @app.get('/api/reading-stats')
     def completed_reading():
@@ -325,7 +363,10 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=()):
             summaryZh=summaries.get(a['index'], {}).get('summaryZh', ''),
             state=states.get(str(a['index']), 'unread'), history=history.get(str(a['index'])),
             earlierOccurrence=duplicates.get(a['index'])) for a in content['articles']]
+        digest = store.load_digest(book_id) or {}
         return jsonify(id=book_id, fileName=meta['fileName'], ext=meta['ext'], articles=items,
+                       title=meta.get('title', ''), sourceUrl=meta.get('sourceUrl', ''),
+                       sourceType=meta.get('sourceType', ''), excerpted=bool(digest.get('excerpted')),
                        duplicateCount=len(duplicates))
 
     @app.post('/api/books/<book_id>/state')
@@ -345,7 +386,8 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=()):
         meta, art = article(book_id, index)
         summary = next((a for a in (store.load_digest(book_id) or {}).get('articles', []) if a['index'] == index), {})
         return jsonify(article=art, titleZh=summary.get('titleZh', ''), summaryZh=summary.get('summaryZh', ''),
-            bookTitle=meta['fileName'], ext=meta['ext'], history=store.load_reading_history(book_id).get(str(index)),
+            bookTitle=meta.get('title') or meta['fileName'], ext=meta['ext'], history=store.load_reading_history(book_id).get(str(index)),
+            sourceUrl=meta.get('sourceUrl', ''), excerpted=bool((store.load_digest(book_id) or {}).get('excerpted')),
             wordCount=len(gen._TOKEN.findall(' '.join(art['paragraphs']))),
             state=store.load_article_states(book_id).get(str(index), 'unread'))
 
@@ -511,6 +553,9 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=()):
         meta, cfg = book(book_id), model(payload())
         def work(update, control):
             with lock_for(book_id):
+                if meta.get('sourceType') == 'podcast':
+                    podcasts.generate_digest(meta, cfg, update, control)
+                    return dict(failed=0)
                 value = gen.generate_digest(meta, cfg,
                     on_progress=lambda done, total: update(status=f'摘要已完成 {done}/{total} 批'),
                     on_chars=lambda chars: update(status=f'摘要正在接收 · {chars} 字'))
@@ -613,7 +658,7 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=()):
         jobs.public(job_id)
         with jobs.lock:
             current = jobs.items[job_id]
-            if current['key'][0] != 'discussion':
+            if current['key'][0] not in ('discussion', 'podcast'):
                 abort(400, '此任务暂不支持中途停止')
             current['control'].cancel()
         return jsonify(ok=True)

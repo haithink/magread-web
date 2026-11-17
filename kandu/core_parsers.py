@@ -619,8 +619,7 @@ def load_library():
 
 
 def save_library(entries):
-    import json
-    library_file().write_text(json.dumps(entries, ensure_ascii=False, indent=1), encoding="utf-8")
+    _atomic_json_write(library_file(), entries)
 
 
 def add_book(src: str, books_dir: str):

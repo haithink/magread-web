@@ -43,7 +43,7 @@ def merge(data, source):
 def web_source(meta, art, when=None):
     return dict(id=web_id(meta['id'], art['index']), kind='web', title=art['title'],
                 wordCount=len(gen._TOKEN.findall(' '.join(art['paragraphs']))),
-                bookId=meta['id'], articleIndex=art['index'], source=meta['fileName'],
+                bookId=meta['id'], articleIndex=art['index'], source=meta.get('title') or meta['fileName'],
                 readAt=when or int(time.time() * 1000))
 
 
@@ -81,7 +81,7 @@ def summary():
                 source = web_source(meta, articles[index], h.get('lastReadAt'))
             elif h.get('title'):
                 source = dict(id=web_id(meta['id'], index), kind='web', bookId=meta['id'],
-                              articleIndex=index, source=meta['fileName'], title=h['title'],
+                              articleIndex=index, source=meta.get('title') or meta['fileName'], title=h['title'],
                               wordCount=h.get('wordCount', 0), readAt=h['lastReadAt'])
             else:
                 continue
