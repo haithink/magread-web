@@ -99,6 +99,8 @@ Windows 启动器可读取仓库外的 `%LOCALAPPDATA%\KanduWebRuntime\web-launc
 
 Web 登录密码、HttpOnly/SameSite 会话、CSRF、请求来源与访问主机名校验默认启用。浏览器使用纯文本节点显示用户和模型内容，不执行返回的 HTML。
 
+需要在另一台 Windows 电脑继续使用同一域名时，参阅 [同域名主机迁移流程](docs/HOST_MIGRATION.md)：包含旧机停服与备份、全部阅读数据及原刊迁移、绝对路径修正、隧道凭据复用、新机验证、登录启动项和失败回退。当前需要手动切换，同一时刻只让一台主机提供服务。
+
 ## 测试与开发
 
 ```bash
