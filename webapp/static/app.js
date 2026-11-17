@@ -25,8 +25,9 @@ function toast(text) {
   $('#toast').textContent = text; $('#toast').hidden = false;
   clearTimeout(toastTimer); toastTimer = setTimeout(() => $('#toast').hidden = true, 4500);
 }
-async function api(path, {method = 'GET', data, form, keepalive = false} = {}) {
+async function api(path, {method = 'GET', data, form, keepalive = false, uploadSize} = {}) {
   const headers = {};
+  if(uploadSize!==undefined)headers['X-Upload-Size']=String(uploadSize);
   if (method !== 'GET') headers['X-CSRF-Token'] = state.csrf;
   if (data !== undefined) headers['Content-Type'] = 'application/json';
   const response = await fetch('/api' + path, {method, headers, credentials:'same-origin',
@@ -34,7 +35,9 @@ async function api(path, {method = 'GET', data, form, keepalive = false} = {}) {
   const result = await response.json();
   if (!response.ok) {
     if (response.status === 401 && path !== '/login') showLogin();
-    throw new Error(result.error || '请求未完成');
+    const error=new Error(result.error || '请求未完成');error.code=result.code;error.status=response.status;
+    if(error.code==='config_locked'&&location.hash==='#/settings')queueMicrotask(route);
+    throw error;
   }
   return result;
 }
@@ -211,17 +214,24 @@ async function podcastSheet() {
   }
 }
 
-function uploadSheet() {
+async function uploadSheet() {
+  let quota;
+  try {quota=await api('/upload-quota');} catch(error){toast(error.message);return;}
   const file=el('input',{type:'file',accept:'.epub,.pdf','aria-label':'选择刊物'});
-  const form=el('form',{class:'form-stack upload-form'},el('p',{class:'muted'},'添加 EPUB 或 PDF（最大 150 MB）。摘要可在文章目录中生成。'),file,
+  const megabytes=bytes=>(bytes/1024**2).toLocaleString(undefined,{maximumFractionDigits:1});
+  const usage=el('p',{class:'muted upload-quota'},`单个文件最多 ${megabytes(quota.fileBytes)} MB；每日合计 ${megabytes(quota.dailyBytes)} MB，今天剩余 ${megabytes(quota.remainingBytes)} MB（按服务器日期 ${quota.day}）。`);
+  const form=el('form',{class:'form-stack upload-form'},el('p',{class:'muted'},'添加 EPUB 或 PDF。摘要可在文章目录中生成。'),usage,file,
     el('button',{type:'submit',class:'primary'},'上传并加入书库'));
   form.onsubmit=action(async event=>{
     event.preventDefault();if(!file.files.length)return;
-    if(file.files[0].size>150*1024**2)throw new Error('文件超过 150 MB');
+    if(file.files[0].size>quota.fileBytes)throw new Error('单个文件不得超过 50 MB');
     const submit=$('button',form);submit.disabled=true;
     try {
+      quota=await api('/upload-quota');
+      usage.textContent=`单个文件最多 ${megabytes(quota.fileBytes)} MB；每日合计 ${megabytes(quota.dailyBytes)} MB，今天剩余 ${megabytes(quota.remainingBytes)} MB（按服务器日期 ${quota.day}）。`;
+      if(file.files[0].size>quota.remainingBytes)throw new Error('今日上传额度不足，每日累计最多 500 MB，请明天再试');
       const body=new FormData();body.append('file',file.files[0]);
-      const {jobId}=await api('/books',{method:'POST',form:body});
+      const {jobId}=await api('/books',{method:'POST',form:body,uploadSize:file.files[0].size});
       $('#sheet').close();
       state.activeJobs.set(jobId,{status:'正在添加刊物'});displayJobBar();
       const poll=async()=>{
@@ -725,21 +735,42 @@ async function editWord(word='') {
 }
 
 async function settingsPage(token) {
-  const [data,sync]=await Promise.all([api('/settings'),api('/reading-sync')]);if(token!==state.route)return;
+  const [data,sync,access]=await Promise.all([api('/preferences'),api('/reading-sync'),api('/settings/access')]);if(token!==state.route)return;
   const level=el('select',{},...Object.entries({cet4:'四级 CET-4',cet6:'六级 CET-6',toefl:'TOEFL',gre:'GRE'}).map(([k,v])=>el('option',{value:k},v)));level.value=data.vocabLevel;
-  level.onchange=action(async()=>{await api('/settings',{method:'POST',data:{vocabLevel:level.value}});toast('词汇水平已保存');});
+  level.onchange=action(async()=>{await api('/preferences',{method:'POST',data:{vocabLevel:level.value}});toast('词汇水平已保存');});
+  const modelPanels=el('div',{class:'settings-grid config-panels'});
+  view.replaceChildren(heading('MAKE IT YOURS','阅读设置','模型配置由独立密码保护，各设备共用阅读偏好'),
+    el('section',{class:'panel'},el('h2',{},'阅读偏好'),el('label',{},'默认已掌握的词汇',level)),modelPanels,syncSettingsPanel(sync));
+  if(!access.unlocked){
+    const password=el('input',{type:'password',required:true,maxlength:200,autocomplete:'current-password','aria-label':'模型配置独立密码'});
+    const error=el('p',{class:'error',role:'alert',hidden:true});
+    const submit=el('button',{type:'submit',class:'primary',disabled:!access.configured},'解锁模型配置');
+    const form=el('form',{class:'form-stack config-unlock-form'},el('label',{},'独立密码',password),error,submit);
+    form.onsubmit=async event=>{
+      event.preventDefault();submit.disabled=true;error.hidden=true;
+      try {await api('/settings/unlock',{method:'POST',data:{password:password.value}});if(token===state.route)await route();}
+      catch(failure){error.textContent=failure.message;error.hidden=false;}
+      finally {password.value='';submit.disabled=false;}
+    };
+    modelPanels.append(el('section',{class:'panel config-locked'},el('h2',{},'模型配置已锁定'),
+      el('p',{class:'muted'},access.configured?'查看、编辑和导入 LLM 配置需要独立密码，解锁有效期为 15 分钟。':'请先在服务器运行 tools/set_config_password.py 设置独立密码。'),form));
+    return;
+  }
+  const settings=await api('/settings');if(token!==state.route)return;
+  state.settingsTimer=setTimeout(()=>{if(token===state.route)route();},Math.max(0,access.expiresAt-Date.now())+100);
   const models=el('div');
-  for(const item of data.models)models.append(el('div',{class:'model-item'},el('div',{},item.name,el('small',{},item.provider+' · '+item.model)),
+  for(const item of settings.models)models.append(el('div',{class:'model-item'},el('div',{},item.name,el('small',{},item.provider+' · '+item.model)),
     el('div',{class:'model-actions'},button('编辑',()=>editModel(item)),
-      button(item.name===data.defaultModel?'默认模型':'设为默认',action(async()=>{await api('/settings',{method:'POST',data:{defaultModel:item.name}});route();}),item.name===data.defaultModel?'secondary':''))));
-  if(!data.models.length)models.append(el('p',{class:'muted'},'尚未配置模型。已有的阅读结果仍可浏览。'));
+      button(item.name===settings.defaultModel?'默认模型':'设为默认',action(async()=>{await api('/settings',{method:'POST',data:{defaultModel:item.name}});route();}),item.name===settings.defaultModel?'secondary':''))));
+  if(!settings.models.length)models.append(el('p',{class:'muted'},'尚未配置模型。已有的阅读结果仍可浏览。'));
   const name=el('input',{placeholder:'配置名称（可留空）'}),json=el('textarea',{placeholder:'粘贴完整 cc-switch / Claude Code / OpenAI 配置 JSON',rows:7,spellcheck:false,autocomplete:'off'});
   const form=el('form',{class:'form-stack'},el('label',{},'名称',name),el('label',{},'配置 JSON',json),
     el('small',{class:'muted'},'密钥只保存在服务器，不会回传到页面。'),el('button',{type:'submit',class:'primary'},'保存并设为默认'));
   form.onsubmit=action(async event=>{event.preventDefault();await api('/settings',{method:'POST',data:{name:name.value,configJson:json.value}});json.value='';toast('模型配置已保存');route();});
-  view.replaceChildren(heading('MAKE IT YOURS','阅读设置','模型和词汇水平由这台服务器统一管理'),
-    el('div',{class:'settings-grid'},el('section',{class:'panel'},el('h2',{},'阅读偏好'),el('label',{},'默认已掌握的词汇',level),el('hr'),el('h2',{},'模型配置'),models),
-      el('section',{class:'panel'},el('h2',{},'导入模型配置'),form)),syncSettingsPanel(sync));
+  modelPanels.append(el('section',{class:'panel'},el('h2',{},'模型配置'),
+    el('p',{class:'muted'},'已临时解锁，到期后自动锁定。'),
+    button('立即锁定模型配置',action(async()=>{await api('/settings/lock',{method:'POST',data:{}});route();})),models),
+    el('section',{class:'panel'},el('h2',{},'导入模型配置'),form));
 }
 
 function syncSettingsPanel(initial) {
@@ -823,6 +854,7 @@ function editModel(initial) {
 }
 
 async function route() {
+  clearTimeout(state.settingsTimer);
   if(!state.csrf){showLogin();return;}
   state.statsCleanup?.();state.statsCleanup=null;
   if(state.reader){await Promise.all([saveProgress(true),stopReadingClock(state.reader)]);document.removeEventListener('selectionchange',state.reader.selectionHandler);

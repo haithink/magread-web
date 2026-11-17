@@ -30,6 +30,9 @@ from webapp import podcasts
 from webapp import podcast_covers
 from webapp import podcast_library
 from webapp.login_security import ClientAddressError, LoginLimiter, login_address
+from webapp.config_security import ConfigAccess
+from webapp.upload_security import (UploadQuota, UploadQuotaExceeded, UploadState, UploadRequest,
+                                    FILE_BYTES, DAILY_BYTES, REQUEST_BYTES)
 
 STATIC = Path(__file__).parent / 'static'
 BOOK_ID = re.compile(r'[A-Za-z0-9._-]{1,220}\Z')
@@ -106,7 +109,9 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare
         (root / 'access-code.txt').write_text(code + '\n', encoding='utf-8')
     auth = json.loads(auth_file.read_text(encoding='utf-8'))
     app = Flask(__name__, static_folder=None)
-    app.config.update(SECRET_KEY=auth['secret'], MAX_CONTENT_LENGTH=150 * 1024**2,
+    app.request_class = UploadRequest
+    app.config.update(SECRET_KEY=auth['secret'], MAX_CONTENT_LENGTH=REQUEST_BYTES,
+                      UPLOAD_FILE_BYTES=FILE_BYTES, UPLOAD_DAILY_BYTES=DAILY_BYTES,
                       SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE='Strict',
                       SESSION_COOKIE_SECURE=secure_cookie, SESSION_COOKIE_NAME='kandu_web',
                       HTTPS_HOSTS=frozenset(h.lower() for h in (*https_hosts, *cloudflare_hosts)),
@@ -121,6 +126,9 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare
     data_lock = threading.RLock()
     book_locks = {}
     login_limiter = LoginLimiter(root / 'login-rate.sqlite3', auth['secret'])
+    config_access = ConfigAccess(root, auth['secret'])
+    config_limiter = LoginLimiter(root / 'config-access.sqlite3', auth['secret'], limit=5)
+    upload_quota = UploadQuota(root / 'upload-quota.sqlite3')
     password_slots = threading.BoundedSemaphore(2)
     podcast_jobs = {}
     started = time.time()
@@ -174,6 +182,55 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare
     def accepted(job_id):
         return jsonify(jobId=job_id), 202
 
+    def config_expiry():
+        return config_access.expires(session.get('configGrant', ''), session.get('csrf', ''))
+
+    def require_config_access():
+        if not config_expiry():
+            return jsonify(error='请先输入独立密码解锁模型配置', code='config_locked'), 403
+
+    def client_address():
+        try:
+            return login_address(request.remote_addr or '', urlsplit(request.host_url).hostname or '',
+                                 app.config['CLOUDFLARE_HOSTS'], request.headers.get('CF-Connecting-IP', ''))
+        except ClientAddressError as error:
+            abort(400, str(error))
+
+    def prepare_upload():
+        request.max_content_length = app.config['UPLOAD_FILE_BYTES'] + 64*1024
+        request.max_form_parts = 1
+        request.max_form_memory_size = 256*1024
+        size = request.content_length
+        if size is None or size <= 0:
+            abort(411, '上传必须提供请求大小')
+        if size > request.max_content_length:
+            abort(413, '单个文件不得超过 50 MB')
+        if request.mimetype != 'multipart/form-data':
+            abort(415, '请使用文件上传表单')
+        declared = request.headers.get('X-Upload-Size')
+        if declared is not None:
+            if not re.fullmatch(r'[0-9]{1,12}', declared):
+                abort(400, '无效的上传文件大小')
+            reserved = int(declared)
+            if reserved > app.config['UPLOAD_FILE_BYTES']:
+                abort(413, '单个文件不得超过 50 MB')
+            if reserved > size:
+                abort(400, '文件大小与请求不符')
+            if size > reserved + 64*1024:
+                abort(400, '上传请求大小与文件声明不符')
+        else:
+            # Compatibility with older clients: reserve a safe upper bound.
+            # New clients declare file.size, which the stream then enforces.
+            reserved = min(size, app.config['UPLOAD_FILE_BYTES'])
+        try:
+            ticket = upload_quota.reserve(reserved, app.config['UPLOAD_DAILY_BYTES'])
+        except UploadQuotaExceeded as error:
+            return jsonify(error=str(error), code='upload_quota_exceeded'), 429
+        except sqlite3.Error:
+            return jsonify(error='上传额度服务暂时不可用，请稍后重试'), 503
+        request.environ['kandu.upload'] = UploadState(ticket, reserved, upload_quota,
+                                                     app.config['UPLOAD_FILE_BYTES'], app.config['UPLOAD_DAILY_BYTES'])
+
     @app.before_request
     def guard():
         hostname = urlsplit(request.host_url).hostname
@@ -203,6 +260,25 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare
             if request.method not in ('GET', 'HEAD'):
                 if not secrets.compare_digest(request.headers.get('X-CSRF-Token', ''), session.get('csrf', 'missing')):
                     abort(403, '会话已失效，请刷新页面后重试')
+        if request.path == '/api/settings':
+            if denied := require_config_access():
+                return denied
+        if request.path == '/api/books' and request.method == 'POST':
+            return prepare_upload()
+
+    @app.teardown_request
+    def finish_upload(error):
+        state = request.environ.get('kandu.upload')
+        if state is None or state.finished:
+            return
+        state.finished = True
+        for stream in state.streams:
+            stream.close()
+        try:
+            upload_quota.finish(state.ticket, state.received)
+        except (sqlite3.Error, ValueError):
+            # Keep the larger reservation charged when accounting fails.
+            app.logger.error('Upload accounting unavailable; reservation retained')
 
     @app.after_request
     def headers(response):
@@ -244,11 +320,7 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare
         request.max_content_length = 8 * 1024
         if request.content_length is not None and request.content_length > request.max_content_length:
             abort(413, '登录请求过大')
-        try:
-            address = login_address(request.remote_addr or '', urlsplit(request.host_url).hostname or '',
-                                    app.config['CLOUDFLARE_HOSTS'], request.headers.get('CF-Connecting-IP', ''))
-        except ClientAddressError as error:
-            abort(400, str(error))
+        address = client_address()
         # Bound expensive password hashing without a global failure counter
         # that could lock every visitor out. Existing sessions bypass login.
         if not password_slots.acquire(blocking=False):
@@ -267,6 +339,7 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare
                 return jsonify(error='登录防护暂时不可用，请稍后重试', retryAfter=2), 503, {'Retry-After': '2'}
         finally:
             password_slots.release()
+        config_access.revoke(session.get('configGrant', ''))
         session.clear()
         session.update(authenticated=True, csrf=secrets.token_urlsafe(24))
         session.permanent = True
@@ -274,8 +347,67 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare
 
     @app.post('/api/logout')
     def logout():
+        config_access.revoke(session.get('configGrant', ''))
         session.clear()
         return jsonify(ok=True)
+
+    @app.get('/api/settings/access')
+    def settings_access():
+        expires = config_expiry()
+        return jsonify(configured=bool(config_access.password_hash()), unlocked=bool(expires), expiresAt=int(expires*1000))
+
+    @app.post('/api/settings/unlock')
+    def unlock_settings():
+        request.max_content_length = 8*1024
+        if request.content_length is not None and request.content_length > request.max_content_length:
+            abort(413, '验证请求过大')
+        address = client_address()
+        password_hash = config_access.password_hash()
+        if not password_hash:
+            return jsonify(error='管理员尚未设置独立密码，请在服务器运行 tools/set_config_password.py'), 503
+        if not password_slots.acquire(blocking=False):
+            return jsonify(error='密码验证繁忙，请稍后重试'), 503, {'Retry-After': '2'}
+        try:
+            try:
+                ticket, retry = config_limiter.reserve(address)
+                if retry:
+                    return jsonify(error=f'独立密码尝试过多，请 {retry} 秒后再试', retryAfter=retry), 429, {'Retry-After': str(retry)}
+                password = payload().get('password', '')
+                if not isinstance(password, str) or len(password)>200 or not check_password_hash(password_hash, password):
+                    return jsonify(error='独立密码不正确'), 403
+                config_limiter.success(address, ticket)
+                config_access.revoke(session.get('configGrant', ''))
+                grant, expires = config_access.issue(session['csrf'], password_hash)
+                session['configGrant'] = grant
+            except sqlite3.Error:
+                return jsonify(error='配置验证暂时不可用，请稍后重试'), 503
+        finally:
+            password_slots.release()
+        return jsonify(unlocked=True, expiresAt=int(expires*1000))
+
+    @app.post('/api/settings/lock')
+    def lock_settings():
+        config_access.revoke(session.pop('configGrant', ''))
+        return jsonify(unlocked=False)
+
+    @app.get('/api/preferences')
+    def preferences():
+        return jsonify(vocabLevel=config.load_settings()['vocabLevel'])
+
+    @app.post('/api/preferences')
+    def save_preferences():
+        data = payload()
+        if set(data) != {'vocabLevel'} or data['vocabLevel'] not in gen.LEVEL_LABEL:
+            abort(400, '未知词汇级别或偏好字段')
+        with data_lock:
+            current = config.load_settings()
+            current['vocabLevel'] = data['vocabLevel']
+            store._atomic_json_write(config.settings_path(), current)
+        return jsonify(ok=True)
+
+    @app.get('/api/upload-quota')
+    def upload_status():
+        return jsonify(fileBytes=app.config['UPLOAD_FILE_BYTES'], **upload_quota.status(app.config['UPLOAD_DAILY_BYTES']))
 
     @app.get('/api/library')
     def library():
@@ -733,6 +865,10 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare
     @app.post('/api/books')
     def upload():
         file = request.files.get('file')
+        state = request.environ['kandu.upload']
+        declared = request.headers.get('X-Upload-Size')
+        if declared is not None and state.received != int(declared):
+            abort(400, '文件实际大小与声明值不一致')
         if not file or not file.filename:
             abort(400, '请选择 EPUB 或 PDF 文件')
         name = Path(file.filename.replace('\\', '/')).name[:180]
@@ -747,7 +883,11 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare
         staging = root / 'uploads' / secrets.token_hex(12)
         staging.mkdir(parents=True)
         path = staging / name
-        file.save(path)
+        try:
+            file.save(path)
+        except Exception:
+            shutil.rmtree(staging)
+            raise
         def work(update, control):
             try:
                 update(status='正在解析刊物和提取封面')

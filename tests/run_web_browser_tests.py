@@ -61,6 +61,11 @@ def check_model_editor(page, new_name, replace_key=False):
     page.get_by_role('link', name='设置', exact=True).click()
     page.reload()
     expect(page.get_by_role('heading', name='阅读设置')).to_be_visible()
+    expect(page.locator('.config-locked')).to_be_visible()
+    expect(page.locator('.model-item')).to_have_count(0)
+    page.get_by_label('模型配置独立密码').fill(WebTests.config_password)
+    page.get_by_role('button', name='解锁模型配置', exact=True).click()
+    expect(page.locator('.model-item')).to_have_count(1)
     initial = config.load_settings()['llms'][0]
     page.locator('.model-item').get_by_role('button', name='编辑', exact=True).click()
     expect(page.get_by_label('API 地址', exact=True)).to_have_value(initial['baseUrl'])

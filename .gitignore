@@ -34,6 +34,7 @@ _test_artifacts/
 settings.json
 books.json
 web-auth.json
+config-auth.json
 reading-stats.json
 reading-sync-auth.json
 access-code.txt

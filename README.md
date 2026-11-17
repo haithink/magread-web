@@ -6,7 +6,7 @@
 
 ## 功能
 
-- EPUB/PDF 上传、封面与刊物分类、最近阅读及继续阅读。
+- EPUB/PDF 上传（单文件 50 MB、全站每天 500 MB）、封面与刊物分类、最近阅读及继续阅读。
 - Podcast 文字来源：导入 Lex Fridman Podcast 最近 50 期官方 Transcript，首页每个播客只显示一本书、每期作为一篇文章，自动生成中文摘要，不自动生成生词表。
 - 文章摘要与搜索，未读、已读、不感兴趣标记。
 - 文章目录默认隐藏更早刊物已收录的同标题文章，可展开重复文章并跳转到更早出处。
@@ -102,6 +102,16 @@
 
 新用户第一次启动时书库和模型配置为空，需要上传刊物并配置自己的模型。代码中不包含开发者的 API Key 或访问密码；本机已存在的 Web 数据目录会继续沿用。
 
+查看、编辑、导入和切换默认 LLM 配置需输入独立密码。首次部署请在服务器项目目录运行以下命令，在隐藏输入提示中设置两次密码；不要将密码作为命令行参数、写入源码或公开配置示例：
+
+```powershell
+& "$env:LOCALAPPDATA\KanduWebRuntime\.venv\Scripts\python.exe" tools/set_config_password.py
+```
+
+自定义数据目录时追加 `--data-dir <数据目录>`。独立密码只保存哈希，不生成明文密码文件；未设置时配置接口保持锁定。每个浏览器需分别解锁，有效期 15 分钟，到期或点击「立即锁定模型配置」后隐藏配置并拒绝后续读写。退出登录撤销该浏览器的解锁权限，重新运行上述命令可更换密码并立即使旧解锁失效。密码验证沿用可信代理地址识别，10 分钟最多尝试 5 次，重启保留限流。普通阅读、调用已配置模型和修改词汇水平无需独立密码；API Key 始终不回传浏览器。
+
+上传窗口显示今日剩余额度。单文件最大 `50 × 1024²` 字节，全站所有浏览器每天合计最多 `500 × 1024²` 字节，按服务器本地日期在午夜更新；失败、重复、格式不支持的文件也计入服务器实际接收处理的文件字节，不包含 multipart 表单开销。额度预留和结算保存在仓库外的 SQLite 中，支持并发并且重启不清零；进程异常退出时未结算的预留额度保守保留到当天结束。新客户端以 `X-Upload-Size` 声明准确文件大小，后台逐块校验，拒绝伪报大小、超限文件和一次上传多个文件；兼容无此头的旧客户端时按请求大小预留上界，接近剩余额度时建议刷新后使用新版网页。书籍上传整体 HTTP 请求额外允许 64 KiB 表单开销，Web 服务器传输上限同步收紧；这是应用层的文件接收额度，不是 Cloudflare 边缘带宽限额，也不限制管理员在服务器本地导入已有数据。
+
 ## 手动安装及其他系统
 
 请将虚拟环境建在源代码目录之外，例如：
@@ -132,6 +142,9 @@ http://服务器局域网IP:8766
 | 模型配置及 API Key | `%LOCALAPPDATA%\KanduWeb\settings.json` |
 | 首次生成的访问密码 | `%LOCALAPPDATA%\KanduWeb\access-code.txt` |
 | 会话签名和密码哈希 | `%LOCALAPPDATA%\KanduWeb\web-auth.json` |
+| LLM 配置独立密码哈希 | `%LOCALAPPDATA%\KanduWeb\config-auth.json` |
+| 配置解锁权限和验证限流 | `%LOCALAPPDATA%\KanduWeb\config-access.sqlite3` |
+| 每日上传量和在途预留额度 | `%LOCALAPPDATA%\KanduWeb\upload-quota.sqlite3` |
 | 阅读计时及每日活动数据 | `%LOCALAPPDATA%\KanduWeb\reading-activity.sqlite3` |
 | 登录限流记录（地址的带密钥摘要、时间，无明文 IP） | `%LOCALAPPDATA%\KanduWeb\login-rate.sqlite3` |
 | 刊物、缓存、生词本、阅读记录与讨论 | `%LOCALAPPDATA%\KanduWeb` 下各子目录 |
@@ -189,6 +202,7 @@ Web 登录密码、HttpOnly/SameSite 会话、CSRF、请求来源与访问主机
 python -m pip install -r requirements-dev.txt
 python tests/run_web_tests.py
 python tests/run_login_security_tests.py
+python tests/run_access_upload_tests.py
 python tests/run_reading_stats_tests.py
 python tests/run_article_duplicate_tests.py
 python tests/run_podcast_tests.py
@@ -197,6 +211,7 @@ python tests/run_phrase_tests.py
 python tests/run_privacy_tests.py
 python -m playwright install chromium
 python tests/run_web_browser_tests.py
+python tests/run_access_upload_browser_tests.py
 python tests/run_article_duplicate_browser_tests.py
 python tests/run_podcast_browser_tests.py
 python tests/run_lookup_browser_tests.py

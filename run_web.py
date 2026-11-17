@@ -30,6 +30,7 @@ def main():
         print('Imported publications:', import_desktop(args.import_desktop, args.data_dir), flush=True)
     os.environ['KANDU_DATA_DIR'] = str(args.data_dir.resolve())
     from webapp.server import create_app
+    from webapp.upload_security import REQUEST_BYTES
     from waitress import serve
     app = create_app(allowed_hosts=args.allowed_host, secure_cookie=args.secure_cookie, https_hosts=args.https_host,
                      cloudflare_hosts=args.cloudflare_host)
@@ -37,7 +38,7 @@ def main():
     for address in sorted({r[4][0] for r in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)}):
         print(f'LAN address: http://{address}:{args.port}', flush=True)
     print('Access code file:', args.data_dir.resolve() / 'access-code.txt', flush=True)
-    serve(app, host=args.host, port=args.port, threads=12, max_request_body_size=160 * 1024**2,
+    serve(app, host=args.host, port=args.port, threads=12, max_request_body_size=REQUEST_BYTES,
           channel_timeout=120, ident='Kandu Web')
 
 

@@ -15,6 +15,7 @@ import threading
 import time
 import unittest
 from unittest.mock import patch
+from werkzeug.security import generate_password_hash
 
 from kandu import core_config as config, core_parsers as store, core_gen as gen
 from kandu import core_llm as llm, core_wordbook as wordbook, core_dict
@@ -40,6 +41,8 @@ class WebTests(unittest.TestCase):
             titleZh='坦率的看法', summaryZh='这是已经生成的摘要。')]))
         config.save_settings(dict(config.DEFAULTS, llms=[dict(name='test', provider='openai', baseUrl='https://example.invalid',
             apiKey='SOURCE_SECRET_DO_NOT_EXPOSE', model='test-model')], defaultLlm='test'))
+        cls.config_password = 'isolated-config-password'
+        store._atomic_json_write(root / 'config-auth.json', dict(passwordHash=generate_password_hash(cls.config_password, method='pbkdf2:sha256:1000')))
         cls.app = create_app()
         cls.app.testing = True
         cls.authcode = (root / 'access-code.txt').read_text().strip()
@@ -59,6 +62,7 @@ class WebTests(unittest.TestCase):
         response = self.client.post('/api/login', json={'password':self.authcode})
         self.assertEqual(response.status_code, 200)
         self.headers = {'X-CSRF-Token':response.json['csrf'], 'Origin':'http://localhost'}
+        self.assertEqual(self.post('/settings/unlock', {'password':self.config_password}).status_code, 200)
 
     def post(self, path, data):
         return self.client.post('/api'+path, json=data, headers=self.headers)

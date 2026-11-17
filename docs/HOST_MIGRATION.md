@@ -73,6 +73,8 @@ Get-NetTCPConnection -LocalPort 8766 -State Listen -ErrorAction SilentlyContinue
 
 `KanduWeb` 包含 `books.json`、`settings.json`、`web-auth.json`、`access-code.txt`、缓存、封面、生词本 SQLite 数据库、阅读进度、文章标记和讨论等；`reading-stats.json` 保存已读清单，`reading-activity.sqlite3` 保存有效阅读耗时及每日曲线数据。应复制整个目录，不要只选摘要或数据库；数据库存在配套的 journal/WAL 文件时也保留在完整快照中。
 
+另外保留 `config-auth.json`（模型配置独立密码哈希）、`config-access.sqlite3`（临时解锁及验证限流）和 `upload-quota.sqlite3`（全站当日上传量及预留额度）。独立密码不保存在 `access-code.txt`；忘记时在服务器运行 `tools/set_config_password.py` 重新设置，旧解锁随即失效。每日 500 MB 额度按新机的本地日期计算，迁移时检查系统日期、时区正确。
+
 从桌面版导入的书籍可能引用数据目录外的原刊。仅复制 `KanduWeb` 不保证包含全部书籍，需根据 `books.json` 检查。
 
 如果使用了自定义 `KANDU_WEB_DATA_DIR` 或 `--data-dir`，以实际数据目录为准，并在新机配置相同用途的路径。新机启动器默认读取 `KANDU_WEB_DATA_DIR`，否则使用 `%LOCALAPPDATA%\KanduWeb`。
