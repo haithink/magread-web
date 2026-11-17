@@ -44,6 +44,7 @@ def web_source(meta, art, when=None):
     return dict(id=web_id(meta['id'], art['index']), kind='web', title=art['title'],
                 wordCount=len(gen._TOKEN.findall(' '.join(art['paragraphs']))),
                 bookId=meta['id'], articleIndex=art['index'], source=meta.get('title') or meta['fileName'],
+                publication=meta.get('publication', ''),
                 readAt=when or int(time.time() * 1000))
 
 
@@ -59,12 +60,13 @@ def mark_web(meta, art, completed):
     save(data)
 
 
-def summary():
+def summary(days=365, timezone_offset=0):
     data = load()
     before = repr(data)
     # Migrate existing completion evidence using caches only. Never parse a book
     # or call a model just to display statistics.
-    for meta in store.load_library():
+    library = store.load_library()
+    for meta in library:
         states = store.load_article_states(meta['id'])
         history = store.load_reading_history(meta['id'])
         eligible = {int(i) for i, value in states.items() if value == 'read'}
@@ -98,7 +100,12 @@ def summary():
         item['readAt'] = max(item['readAt'], source['readAt'])
         item['sources'].append(source)
     articles = sorted(groups.values(), key=lambda a: a['readAt'], reverse=True)
-    return dict(articleCount=len(articles), totalWords=sum(a['wordCount'] for a in articles), articles=articles)
+    from webapp import reading_activity
+    publications = {m['id']:m.get('publication') or re.sub(r'[_ .-]*\d{4}.*$', '', m['fileName']).replace('_',' ').strip()
+        for m in library}
+    analytics = reading_activity.report(articles, days=days, timezone_offset=timezone_offset, publications=publications)
+    return dict(articleCount=len(articles), totalWords=sum(a['wordCount'] for a in articles),
+        articles=articles, analytics=analytics)
 
 
 def imported_source(value):

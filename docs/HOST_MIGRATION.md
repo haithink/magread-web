@@ -71,7 +71,7 @@ Get-NetTCPConnection -LocalPort 8766 -State Listen -ErrorAction SilentlyContinue
 | 隧道配置 | `%LOCALAPPDATA%\KanduWebRuntime\cloudflared\config.yml` | 复制并修正凭据路径 |
 | 此隧道的凭据 JSON | `config.yml` 中 `credentials-file` 指向的文件，通常在 `%USERPROFILE%\.cloudflared\` | 私下复制到新机，再更新配置路径 |
 
-`KanduWeb` 包含 `books.json`、`settings.json`、`web-auth.json`、`access-code.txt`、缓存、封面、生词本 SQLite 数据库、阅读进度、文章标记和讨论等。应复制整个目录，不要只选摘要或数据库；数据库存在配套的 journal/WAL 文件时也保留在完整快照中。
+`KanduWeb` 包含 `books.json`、`settings.json`、`web-auth.json`、`access-code.txt`、缓存、封面、生词本 SQLite 数据库、阅读进度、文章标记和讨论等；`reading-stats.json` 保存已读清单，`reading-activity.sqlite3` 保存有效阅读耗时及每日曲线数据。应复制整个目录，不要只选摘要或数据库；数据库存在配套的 journal/WAL 文件时也保留在完整快照中。
 
 从桌面版导入的书籍可能引用数据目录外的原刊。仅复制 `KanduWeb` 不保证包含全部书籍，需根据 `books.json` 检查。
 

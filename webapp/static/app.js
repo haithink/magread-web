@@ -49,6 +49,7 @@ function linkFor(bookId, index, paragraph=null) {
 }
 function baseFor(reader=state.reader) { return `/books/${encodeURIComponent(reader.bookId)}/articles/${reader.index}`; }
 function showSheet(title, content) {
+  if(state.reader?.clock){readingClockTick(state.reader);flushReadingClock(state.reader);}
   state.sheet += 1;
   $('#sheet-title').textContent = title;
   $('#sheet-content').replaceChildren(content);
@@ -58,9 +59,10 @@ function showSheet(title, content) {
 $('#sheet-close').onclick = () => $('#sheet').close();
 $('#sheet').addEventListener('click', event => { if (event.target === $('#sheet')) { const r=$('#sheet').getBoundingClientRect(); if(event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom) $('#sheet').close(); } });
 $('#sheet').addEventListener('close', () => { state.sheet += 1; });
-$('#logout').onclick = action(async () => { await api('/logout', {method:'POST', data:{}}); state.csrf=''; state.reader=null; showLogin(); });
+$('#logout').onclick = action(async () => { if(state.reader)await stopReadingClock(state.reader);await api('/logout', {method:'POST', data:{}}); state.csrf=''; state.reader=null; showLogin(); });
 
 function showLogin() {
+  if(state.reader)stopReadingClock(state.reader,false);
   $('#navigation').hidden = true;
   if ($('#sheet').open) $('#sheet').close();
   view.replaceChildren($('#login-template').content.cloneNode(true));
@@ -322,6 +324,73 @@ function saveProgress(keepalive=false,reader=state.reader) {
     if(key===JSON.stringify(currentPosition(reader)))progressStatus(reader,'已同步');
   }).catch(()=>{reader.lastPosition=null;progressStatus(reader,'待同步');if(!keepalive)toast('阅读进度暂未保存，网络恢复后会重试');});
 }
+
+function readingDuration(ms) {
+  const seconds=Math.floor(ms/1000),minutes=Math.floor(seconds/60);
+  return minutes>=60?`${Math.floor(minutes/60)} 小时 ${minutes%60} 分`:minutes?`${minutes} 分 ${seconds%60} 秒`:`${seconds} 秒`;
+}
+function readingClockReason(reader,now=performance.now()) {
+  if(reader.clock.manualPaused)return '已暂停';
+  if(document.hidden)return '后台暂停';
+  if(!document.hasFocus())return '失焦暂停';
+  if($('#sheet').open)return '弹窗暂停';
+  if(now-reader.clock.lastInteraction>90_000)return '无操作暂停';
+  return '计时中';
+}
+function readingClockTick(reader=state.reader) {
+  if(!reader?.clock||reader.clock.stopped)return;
+  const clock=reader.clock,now=performance.now(),delta=now-clock.lastSample;
+  // Long timer gaps indicate a suspended tab/device, not continuous reading.
+  if(delta>=0&&delta<=2500&&readingClockReason(reader,clock.lastSample)==='计时中') {
+    const until=Math.min(now,clock.lastInteraction+90_000);
+    clock.elapsedMs+=Math.max(0,until-clock.lastSample);
+  }
+  clock.lastSample=now;
+  const status=$('#reader-reading-time');
+  if(state.reader===reader&&status) {
+    const total=clock.serverMs+Math.max(0,clock.elapsedMs-clock.syncedElapsed);
+    const message=`${readingClockReason(reader,now)} · ${readingDuration(total)}${clock.syncFailed?' · 待同步':''}`;
+    if(status.textContent!==message)status.textContent=message;
+  }
+}
+function flushReadingClock(reader=state.reader,keepalive=false,initialPosition=null) {
+  if(!reader?.clock)return Promise.resolve();
+  const clock=reader.clock;
+  if(clock.sending)return clock.sending.then(()=>flushReadingClock(reader,keepalive,initialPosition));
+  const position=initialPosition||currentPosition(reader);if(!position)return Promise.resolve();
+  const elapsedMs=Math.floor(clock.elapsedMs),signature=JSON.stringify([elapsedMs,position]);
+  if(signature===clock.lastSaved)return Promise.resolve();
+  const data={...position,sessionId:clock.id,sequence:clock.sequence++,elapsedMs};
+  clock.sending=api(baseFor(reader)+'/reading-time',{method:'POST',data,keepalive}).then(result=>{
+    clock.serverMs=result.totalActiveMs;clock.syncedElapsed=data.elapsedMs;clock.lastSaved=signature;clock.syncFailed=false;
+  }).catch(()=>{clock.syncFailed=true;}).finally(()=>{clock.sending=null;});
+  return clock.sending;
+}
+function startReadingClock(reader,initialPosition) {
+  const now=performance.now();
+  reader.clock={id:Array.from(crypto.getRandomValues(new Uint8Array(16)),v=>v.toString(16).padStart(2,'0')).join(''),
+    sequence:0,elapsedMs:0,syncedElapsed:0,serverMs:reader.readingTiming?.activeMs||0,
+    lastSample:now,lastInteraction:now,manualPaused:false,stopped:false};
+  const clock=reader.clock;
+  clock.interaction=event=>{if(event.isTrusted){readingClockTick(reader);clock.lastInteraction=performance.now();}};
+  for(const name of ['pointerdown','pointermove','keydown','wheel','touchstart'])window.addEventListener(name,clock.interaction,{passive:true});
+  clock.focus=()=>{readingClockTick(reader);clock.lastInteraction=performance.now();};
+  window.addEventListener('focus',clock.focus);
+  clock.blur=()=>{readingClockTick(reader);flushReadingClock(reader,true);};
+  window.addEventListener('blur',clock.blur);
+  clock.interval=setInterval(()=>{readingClockTick(reader);if(++clock.ticks%15===0)flushReadingClock(reader);},1000);
+  clock.ticks=0;
+  flushReadingClock(reader,false,initialPosition);readingClockTick(reader);
+}
+function stopReadingClock(reader,save=true) {
+  if(!reader?.clock)return Promise.resolve();
+  readingClockTick(reader);
+  const clock=reader.clock;clock.stopped=true;clearInterval(clock.interval);
+  for(const name of ['pointerdown','pointermove','keydown','wheel','touchstart'])window.removeEventListener(name,clock.interaction);
+  window.removeEventListener('focus',clock.focus);
+  window.removeEventListener('blur',clock.blur);
+  return save?flushReadingClock(reader,true):Promise.resolve();
+}
 function selectedQuote() {
   const selection=window.getSelection();if(!selection||selection.isCollapsed)return null;
   const node=selection.anchorNode?.parentElement?.closest('.paragraph');
@@ -371,18 +440,24 @@ async function readerPage(bookId,index,token,startParagraph=null) {
   const progress=el('div',{class:'reader-position'},el('div',{class:'reader-position-labels'},
     el('strong',{id:'reader-percentage'},'阅读进度 0%'),el('span',{id:'reader-paragraph'},`第 1 / ${data.article.paragraphs.length} 段`),
     el('span',{id:'reader-word-count'},`共 ${data.wordCount.toLocaleString()} 词`),
+    el('span',{id:'reader-reading-time',title:'前台阅读自动计时；失焦、弹窗或 90 秒无操作时暂停。阅读速度根据计时期间前进的词数估算。'},'准备计时'),
     el('span',{class:'reader-save-state',id:'reader-save-state'},'自动同步')),
     el('progress',{id:'reader-progress-bar',max:1,value:0,'aria-label':'文章阅读进度'}));
   const vocabButton=button('生成生词表',action(()=>openVocab(null)),'primary');vocabButton.id='vocab-button';
   const find=el('input',{type:'search',placeholder:'在本文中查找…','aria-label':'查找原文'});
   const findRow=el('div',{class:'find-row',hidden:true},find,el('span',{class:'count',id:'find-count'}),button('×',()=>{find.value='';findArticle(reader,'');findRow.hidden=true;}));
+  const pauseTimer=button('暂停计时',()=>{
+    readingClockTick(reader);reader.clock.manualPaused=!reader.clock.manualPaused;
+    reader.clock.lastInteraction=performance.now();pauseTimer.textContent=reader.clock.manualPaused?'继续计时':'暂停计时';
+    readingClockTick(reader);flushReadingClock(reader);
+  });pauseTimer.id='reading-time-toggle';
   const tools=el('div',{class:'reader-toolbar'},el('a',{href:`#/book/${encodeURIComponent(data.parentBookId||bookId)}`},'← 目录'),vocabButton,
     button(data.state==='read'?'已读 ✓':'标记已读',action(async event=>{
       const target=event.target.closest('button');target.disabled=true;
       try{await api(`/books/${encodeURIComponent(bookId)}/state`,{method:'POST',data:{articleIndex:index,state:'read'}});
         reader.state='read';target.textContent='已读 ✓';toast('已计入全局已读统计');}finally{target.disabled=false;}
     })),
-    button('与 AI 讨论',action(()=>discussionSheet(reader))),button('查找',()=>{findRow.hidden=!findRow.hidden;if(!findRow.hidden)find.focus();}),
+    button('与 AI 讨论',action(()=>discussionSheet(reader))),button('查找',()=>{findRow.hidden=!findRow.hidden;if(!findRow.hidden)find.focus();}),pauseTimer,
     el('span',{class:'grow'}),button('A−',()=>resizeReader(reader,-1)),button('A+',()=>resizeReader(reader,1)),
     el('a',{href:`/api/books/${encodeURIComponent(bookId)}/file`,target:'_blank',rel:'noopener'},data.ext==='pdf'?'原版 PDF ↗':'下载 EPUB ↗'),progress);
   const selection=el('div',{class:'selection-tools',id:'selection-tools',hidden:true,role:'toolbar','aria-label':'选中文字操作',
@@ -426,6 +501,7 @@ async function readerPage(bookId,index,token,startParagraph=null) {
     if(explicitPosition)node.classList.add('source-target');
   }
   reader.ready=true;
+  startReadingClock(reader,explicitPosition||data.history&&!data.history.atStart?currentPosition(reader):{paragraphIndex:0,paragraphOffset:0});
   updateReaderProgress(reader);
   readerScroll=()=>{
     if(state.reader!==reader)return;
@@ -687,7 +763,7 @@ function syncSettingsPanel(initial) {
 }
 
 async function readingStatsPage(token) {
-  const data=await api('/reading-stats');if(token!==state.route)return;
+  const data=await api('/reading-stats?days=365&timezoneOffset='+new Date().getTimezoneOffset());if(token!==state.route)return;
   const search=el('input',{type:'search',class:'search',placeholder:'搜索标题、刊物或网站…','aria-label':'搜索已读文章'});
   const list=el('div',{class:'completed-list'}),count=el('span',{class:'count'});
   const render=()=>{
@@ -697,17 +773,26 @@ async function readingStatsPage(token) {
     list.replaceChildren(...found.map(a=>el('article',{class:'completed-card'},
       el('div',{class:'completed-heading'},el('h2',{},a.title),el('strong',{},a.wordCount?`${a.wordCount.toLocaleString()} 词`:'词数待补全')),
       el('div',{class:'completed-meta'},el('time',{datetime:new Date(a.readAt).toISOString()},new Date(a.readAt).toLocaleDateString()),
-        el('span',{},a.sources.length>1?`${a.sources.length} 个出处 · 标题去重后计为 1 篇`:'已读文章')),
+        el('span',{},a.sources.length>1?`${a.sources.length} 个出处 · 标题去重后计为 1 篇`:'已读文章'),
+        el('span',{class:'article-reading-time'},a.timing.activeMs?`有效阅读 ${readingDuration(a.timing.activeMs)}`:'未计时'),
+        el('span',{class:'article-reading-speed'},a.timing.wordsPerMinute!==null?`约 ${a.timing.wordsPerMinute} 词/分钟`:'速度样本不足')),
+      a.timing.activeMs?el('div',{class:'count'},`计时期间约阅读 ${a.timing.measuredWords.toLocaleString()} 词；估算速度包含停留阅读时间，跳转及重复回滚不累计前进词数。`):null,
       el('div',{class:'completed-sources'},...a.sources.map(s=>el('a',s.kind==='chrome'?{href:s.url,target:'_blank',rel:'noopener noreferrer'}:
         {href:linkFor(s.bookId,s.articleIndex)},`${s.kind==='chrome'?'网页':'刊物'} · ${s.source}${s.kind==='chrome'?' ↗':' →'}`))))));
     if(!found.length)list.append(empty(query?'没有匹配的已读文章':'你的阅读积累，从这里开始',
       '读到文章结尾或标记为已读，即可加入；Chrome 网页文章也可以同步到这里。'));
   };
   search.oninput=render;
-  view.replaceChildren(heading('YOUR READING JOURNEY','已读统计','每读完一篇，都是一次积累。跨刊物、跨网页，记录你的阅读足迹。'),
+  const analytics=data.analytics,total=analytics.totals;
+  view.replaceChildren(heading('YOUR READING JOURNEY','已读统计','看见每天的积累，也看见阅读节奏的变化。'),
     el('div',{class:'reading-totals'},el('div',{},el('strong',{'data-stat':'articles'},data.articleCount.toLocaleString()),el('span',{},'已读文章 · 按标题去重')),
-      el('div',{},el('strong',{'data-stat':'words'},data.totalWords.toLocaleString()),el('span',{},'累计阅读词数'))),
+      el('div',{},el('strong',{'data-stat':'words'},data.totalWords.toLocaleString()),el('span',{},'累计已读词数')),
+      el('div',{},el('strong',{'data-stat':'active-time'},readingDuration(total.activeMs)),el('span',{},'有效阅读时长')),
+      el('div',{},el('strong',{'data-stat':'speed'},total.wordsPerMinute===null?'—':`${total.wordsPerMinute} 词/分`),el('span',{},'平均估算速度 · 按总时间加权')),
+      el('div',{},el('strong',{'data-stat':'active-days'},`${analytics.activeDays} 天`),el('span',{},'计时阅读天数')),
+      el('div',{},el('strong',{'data-stat':'streak'},`${analytics.currentStreak} 天`),el('span',{},'当前连续阅读'))),
     el('p',{class:'count'},'标题忽略大小写、空白和标点差异；同标题各出处合并，词数取最大值，不重复累加。'),
+    readingAnalyticsPanel(analytics),
     el('div',{class:'filters'},search,count),list);render();
 }
 
@@ -739,7 +824,8 @@ function editModel(initial) {
 
 async function route() {
   if(!state.csrf){showLogin();return;}
-  if(state.reader){await saveProgress(true);document.removeEventListener('selectionchange',state.reader.selectionHandler);
+  state.statsCleanup?.();state.statsCleanup=null;
+  if(state.reader){await Promise.all([saveProgress(true),stopReadingClock(state.reader)]);document.removeEventListener('selectionchange',state.reader.selectionHandler);
     window.removeEventListener('resize',state.reader.selectionResize);
     window.visualViewport?.removeEventListener('resize',state.reader.selectionResize);
     window.visualViewport?.removeEventListener('scroll',state.reader.selectionResize);}
@@ -762,6 +848,6 @@ async function route() {
   }catch(error){if(token===state.route&&state.csrf)view.replaceChildren(empty('暂时无法打开',error.message),button('重试',()=>route(),'primary'));}
 }
 window.addEventListener('hashchange',route);
-window.addEventListener('pagehide',()=>saveProgress(true));
-document.addEventListener('visibilitychange',()=>{if(document.hidden)saveProgress(true);});
+window.addEventListener('pagehide',()=>{readingClockTick();flushReadingClock(state.reader,true);saveProgress(true);});
+document.addEventListener('visibilitychange',()=>{readingClockTick();if(document.hidden){flushReadingClock(state.reader,true);saveProgress(true);}else if(state.reader?.clock)state.reader.clock.lastInteraction=performance.now();});
 (async()=>{try{const session=await api('/session');if(session.authenticated){state.csrf=session.csrf;await route();}else showLogin();}catch(error){view.replaceChildren(empty('连接服务器失败',error.message));}})();

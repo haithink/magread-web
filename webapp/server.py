@@ -22,6 +22,7 @@ from kandu import core_config as config, core_parsers as store, core_gen as gen
 from kandu import core_llm as llm, core_wordbook as wordbook, core_dict, core_discussion as discussion
 from webapp import __version__
 from webapp import reading_stats
+from webapp import reading_activity
 from webapp import word_meaning
 from webapp import article_duplicates
 from webapp import podcasts
@@ -221,7 +222,7 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=()):
 
     @app.get('/static/<name>')
     def static(name):
-        if name not in ('app.js', 'app.css', 'icon.svg'):
+        if name not in ('app.js', 'app.css', 'icon.svg', 'reading-charts.js'):
             abort(404)
         return send_file(STATIC / name)
 
@@ -320,8 +321,15 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=()):
 
     @app.get('/api/reading-stats')
     def completed_reading():
+        try:
+            days = int(request.args.get('days', '365'))
+            offset = int(request.args.get('timezoneOffset', '0'))
+        except ValueError:
+            abort(400, '统计日期范围无效')
+        if days not in (7,30,90,365) or not -840 <= offset <= 720:
+            abort(400, '统计日期范围无效')
         with data_lock:
-            return jsonify(reading_stats.summary())
+            return jsonify(reading_stats.summary(days=days, timezone_offset=offset))
 
     @app.get('/api/reading-sync')
     def reading_sync_status():
@@ -409,8 +417,14 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=()):
             bookTitle=meta.get('title') or meta['fileName'], ext=meta['ext'], history=store.load_reading_history(book_id).get(str(index)),
             sourceUrl=meta.get('sourceUrl', ''), excerpted=bool((store.load_digest(book_id) or {}).get('excerpted')),
             parentBookId=podcast_library.parent_id(meta),
+            readingTiming=reading_activity.article_timing(book_id,index),
             wordCount=len(gen._TOKEN.findall(' '.join(art['paragraphs']))),
             state=store.load_article_states(book_id).get(str(index), 'unread'))
+
+    @app.post('/api/books/<book_id>/articles/<int:index>/reading-time')
+    def reading_time(book_id,index):
+        meta,art = article(book_id,index)
+        return jsonify(reading_activity.record(meta,art,payload()))
 
     @app.post('/api/books/<book_id>/articles/<int:index>/progress')
     def save_progress(book_id, index):
