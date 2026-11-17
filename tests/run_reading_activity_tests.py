@@ -13,6 +13,7 @@ class ActivityTests(unittest.TestCase):
     def setUpClass(cls):
         WebTests.setUpClass()
         cls.app, cls.authcode = WebTests.app, WebTests.authcode
+        cls.config_password = WebTests.config_password
 
     @classmethod
     def tearDownClass(cls):

@@ -122,7 +122,7 @@ function readingAnalyticsPanel(analytics) {
     node('meter',{min:0,max,value:row.words,'aria-label':`${row.name}：${fmt(row.words)} 词`})));
   extra.append(calendar,sources);root.append(extra);
   root.append(node('details',{class:'reading-measurement-notes'},node('summary',{},'阅读量和速度如何计算？'),
-    node('p',{},'有效时长只累计前台且获得焦点的阅读页面；切换标签页、弹出查词/讲解窗口、手动暂停或 90 秒无操作会暂停。'),
+    node('p',{},'有效时长只累计前台且获得焦点的阅读页面；生成当前文章生词/短语、切换标签页、弹出查词/讲解窗口、手动暂停或 90 秒无操作会暂停。'),
     node('p',{},'计时阅读词数根据正文位置前进估算，不代表逐字阅读或理解；快速跳转不计词数。同一次阅读往回翻不重复计词，重新打开文章从头复读则计入当天阅读量。文章和每日速度均为计时词数除以有效分钟数，跨文章平均按总时间加权。'),
     node('p',{},'计时从本功能启用后开始。历史文章和 Chrome 同步记录没有可靠耗时，不补造速度。多窗口或多设备同时打开时，有效时长不重复累计。日期按当前设备的 UTC 偏移划分；午夜前后的计时会拆分到两天。')));
   const update=()=>{

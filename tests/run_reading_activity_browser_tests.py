@@ -12,6 +12,82 @@ from run_web_tests import WebTests, config, store, llm
 from webapp import reading_activity as activity, reading_stats
 
 
+def check_vocabulary_waits(page, now):
+    """Exercise real generation buttons, with held submissions and fake job states."""
+    submissions=[]
+    job={'state':'running','status':'模拟生成中'}
+    def poll(route):
+        if job['state']=='disconnect':
+            route.abort('failed')
+        else:
+            route.fulfill(json=dict(job, result={}, error='模拟生成失败'))
+    page.route('**/generate-vocab',lambda route:submissions.append(route))
+    page.route('**/api/jobs/vocab-clock-*',poll)
+    try:
+        for terminal in ['done','error','stopped','submission-error','disconnect']:
+            job.update(state='running',status='模拟生成中')
+            page.locator('#vocab-button').click()
+            page.wait_for_function('() => state.vocabWaits.size===1')
+            expect(page.locator('#reader-reading-time')).to_contain_text('生词生成暂停')
+            elapsed=page.evaluate('() => state.reader.clock.elapsedMs')
+            now[0]+=15_000;page.clock.run_for(15_000)
+            assert page.evaluate('() => state.reader.clock.elapsedMs')==elapsed,'Submitting vocabulary must pause'
+            assert len(submissions)==1
+            request=submissions.pop()
+            if terminal=='submission-error':
+                request.fulfill(status=503,json={'error':'模拟提交失败'})
+            else:
+                request.fulfill(status=202,json={'jobId':'vocab-clock-'+terminal})
+                page.wait_for_function('() => state.activeJobs.size===1')
+                now[0]+=15_000;page.clock.run_for(15_000)
+                assert page.evaluate('() => state.reader.clock.elapsedMs')==elapsed,'Generating vocabulary must pause'
+                if terminal=='stopped':
+                    page.get_by_role('button',name='暂停计时',exact=True).click()
+                job.update(state=terminal,status='模拟生成结束')
+                now[0]+=1000;page.clock.run_for(1000)
+            page.wait_for_function('() => state.vocabWaits.size===0')
+            if terminal=='done':
+                expect(page.locator('#sheet')).to_be_visible()
+                now[0]+=15_000;page.clock.run_for(15_000)
+                assert page.evaluate('() => state.reader.clock.elapsedMs')==elapsed,'Viewing generated words must pause'
+                page.locator('#sheet-close').click()
+            if terminal=='stopped':
+                expect(page.locator('#reader-reading-time')).to_contain_text('已暂停')
+                page.get_by_role('button',name='继续计时',exact=True).click()
+            # Failed/stopped generation must not leave the reader permanently paused.
+            page.locator('#reader-reading-time').click()
+            now[0]+=1000;page.clock.run_for(1000)
+            expect(page.locator('#reader-reading-time')).to_contain_text('计时中')
+            assert page.evaluate('() => state.reader.clock.elapsedMs')>elapsed
+        # Repeated requests sharing a job must all release; an unrelated article
+        # keeps counting, and returning to the original one keeps its pause.
+        job.update(state='running',status='模拟生成中')
+        page.locator('#vocab-button').click()
+        page.wait_for_function('() => state.vocabWaits.size===1')
+        now[0]+=1000;page.clock.run_for(1000)
+        submissions.pop().fulfill(status=202,json={'jobId':'vocab-clock-shared'})
+        page.wait_for_function('() => state.activeJobs.size===1')
+        page.evaluate("() => { runJob(baseFor(state.reader)+'/generate-vocab',{phrasesOnly:true}); }")
+        page.wait_for_function('() => state.vocabWaits.size===2')
+        now[0]+=1000;page.clock.run_for(1000)
+        submissions.pop().fulfill(status=202,json={'jobId':'vocab-clock-shared'})
+        page.wait_for_function("() => state.jobObservers.get('vocab-clock-shared')?.length===2")
+        page.goto(page.url.split('#')[0]+'#/read/sample/1')
+        expect(page.locator('#reader-reading-time')).to_contain_text('计时中')
+        page.goto(page.url.split('#')[0]+'#/read/sample/0')
+        expect(page.locator('#reader-reading-time')).to_contain_text('生词生成暂停')
+        elapsed=page.evaluate('() => state.reader.clock.elapsedMs')
+        now[0]+=15_000;page.clock.run_for(15_000)
+        assert page.evaluate('() => state.reader.clock.elapsedMs')==elapsed
+        job.update(state='stopped',status='模拟停止')
+        now[0]+=1000;page.clock.run_for(1000)
+        page.wait_for_function('() => state.vocabWaits.size===0')
+        expect(page.locator('#reader-reading-time')).to_contain_text('计时中')
+    finally:
+        page.unroute('**/generate-vocab')
+        page.unroute('**/api/jobs/vocab-clock-*')
+
+
 def main():
     WebTests.setUpClass()
     paragraph=' '.join(['Reading science requires patience and attention to each carefully written paragraph.']*20)
@@ -79,6 +155,7 @@ def main():
                     page.wait_for_function('() => !state.reader.clock.sending')
                     assert activity.article_timing('sample',0)['activeMs']==paused
                     page.get_by_role('button',name='继续计时',exact=True).click()
+                    check_vocabulary_waits(page,now)
                     # Headless Chromium keeps all pages foreground. Emulate the
                     # platform visibility/focus change, leaving clock code intact.
                     page.evaluate('''() => {
@@ -149,7 +226,7 @@ def main():
                     context.close()
                 browser.close()
             assert not errors,errors
-            print('READING ACTIVITY BROWSER PASS: desktop + phone; heartbeat, manual/modal/idle pause, route cleanup, charts/range/keyboard/calendar/source distribution/search, no models or overflow')
+            print('READING ACTIVITY BROWSER PASS: desktop + phone; vocabulary submission/generation/modal pause and success/error/stop/disconnect cleanup, heartbeat, manual/modal/idle pause, route cleanup, charts/range/keyboard/calendar/source distribution/search, no models or overflow')
         finally:
             server.shutdown();server.server_close();thread.join(timeout=5)
             WebTests.tearDownClass()

@@ -12,7 +12,7 @@ const el = (tag, attrs = {}, ...children) => {
   return node;
 };
 const button = (text, callback, cls = '') => el('button', {type:'button', class:cls, onclick:callback}, text);
-const state = {csrf:'', route:0, reader:null, selection:null, activeJobs:new Map(), jobObservers:new Map(), sheet:0};
+const state = {csrf:'', route:0, reader:null, selection:null, activeJobs:new Map(), jobObservers:new Map(), vocabWaits:new Map(), sheet:0};
 const view = $('#app');
 // Older installed reading extensions also listen on document. Keep our reader and
 // dialog mouse events local so one gesture cannot start another model request.
@@ -84,13 +84,16 @@ function displayJobBar() {
   if(state.activeJobs.size) $('#job-status').textContent=[...state.activeJobs.values()].map(j=>j.status).join(' · ');
 }
 async function runJob(path, data={}, onDone, onUpdate) {
-  const {jobId}=await api(path,{method:'POST',data});
-  if(state.activeJobs.has(jobId)) {toast('这个任务已经在进行中');return jobId;}
-  return watchJob(jobId,onDone,onUpdate);
+  const settled=path.endsWith('/generate-vocab')?pauseVocabularyGeneration(path):()=>{};
+  try {
+    const {jobId}=await api(path,{method:'POST',data});
+    if(state.activeJobs.has(jobId))toast('这个任务已经在进行中');
+    return watchJob(jobId,onDone,onUpdate,settled);
+  } catch(error) {settled();throw error;}
 }
-function watchJob(jobId,onDone,onUpdate) {
+function watchJob(jobId,onDone,onUpdate,onSettled) {
   if(!state.jobObservers.has(jobId))state.jobObservers.set(jobId,[]);
-  state.jobObservers.get(jobId).push({onDone,onUpdate});
+  state.jobObservers.get(jobId).push({onDone,onUpdate,onSettled});
   if(state.activeJobs.has(jobId))return jobId;
   const started=Date.now(); state.activeJobs.set(jobId,{status:'任务已提交'}); displayJobBar();
   const poll=async()=>{
@@ -104,12 +107,16 @@ function watchJob(jobId,onDone,onUpdate) {
         if(job.state==='error') toast(job.error);
         else if(job.state==='done') toast(job.result?.failed?'部分完成，可再次补缺':'已完成并保存');
         const observers=state.jobObservers.get(jobId)||[];state.jobObservers.delete(jobId);
-        for(const observer of observers)if(observer.onDone)await observer.onDone(job);
+        try {for(const observer of observers)if(observer.onDone)await observer.onDone(job);}
+        finally {for(const observer of observers)if(observer.onSettled)observer.onSettled();}
         return;
       }
       setTimeout(poll,650);
     } catch(error) {
-      state.activeJobs.delete(jobId);state.jobObservers.delete(jobId); displayJobBar(); toast('连接中断，服务器任务仍会保存结果。'+error.message);
+      const observers=state.jobObservers.get(jobId)||[];
+      state.activeJobs.delete(jobId);state.jobObservers.delete(jobId);
+      for(const observer of observers)if(observer.onSettled)observer.onSettled();
+      displayJobBar(); toast('连接中断，服务器任务仍会保存结果。'+error.message);
     }
   };
   poll(); return jobId;
@@ -340,10 +347,20 @@ function readingDuration(ms) {
   const seconds=Math.floor(ms/1000),minutes=Math.floor(seconds/60);
   return minutes>=60?`${Math.floor(minutes/60)} 小时 ${minutes%60} 分`:minutes?`${minutes} 分 ${seconds%60} 秒`:`${seconds} 秒`;
 }
+function pauseVocabularyGeneration(path) {
+  const token=Symbol(),articlePath=path.slice(0,-'/generate-vocab'.length);
+  readingClockTick();state.vocabWaits.set(token,articlePath);readingClockTick();
+  flushReadingClock();
+  return ()=>{
+    if(!state.vocabWaits.has(token))return;
+    readingClockTick();state.vocabWaits.delete(token);readingClockTick();
+  };
+}
 function readingClockReason(reader,now=performance.now()) {
   if(reader.clock.manualPaused)return '已暂停';
   if(document.hidden)return '后台暂停';
   if(!document.hasFocus())return '失焦暂停';
+  if([...state.vocabWaits.values()].includes(baseFor(reader)))return '生词生成暂停';
   if($('#sheet').open)return '弹窗暂停';
   if(now-reader.clock.lastInteraction>90_000)return '无操作暂停';
   return '计时中';
@@ -451,7 +468,7 @@ async function readerPage(bookId,index,token,startParagraph=null) {
   const progress=el('div',{class:'reader-position'},el('div',{class:'reader-position-labels'},
     el('strong',{id:'reader-percentage'},'阅读进度 0%'),el('span',{id:'reader-paragraph'},`第 1 / ${data.article.paragraphs.length} 段`),
     el('span',{id:'reader-word-count'},`共 ${data.wordCount.toLocaleString()} 词`),
-    el('span',{id:'reader-reading-time',title:'前台阅读自动计时；失焦、弹窗或 90 秒无操作时暂停。阅读速度根据计时期间前进的词数估算。'},'准备计时'),
+    el('span',{id:'reader-reading-time',title:'前台阅读自动计时；生词生成、失焦、弹窗或 90 秒无操作时暂停。阅读速度根据计时期间前进的词数估算。'},'准备计时'),
     el('span',{class:'reader-save-state',id:'reader-save-state'},'自动同步')),
     el('progress',{id:'reader-progress-bar',max:1,value:0,'aria-label':'文章阅读进度'}));
   const vocabButton=button('生成生词表',action(()=>openVocab(null)),'primary');vocabButton.id='vocab-button';
