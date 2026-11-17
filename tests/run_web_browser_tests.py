@@ -280,9 +280,42 @@ def main():
                     paragraphCount=1,paragraphOffset=0,progress=.2,wordCount=12))
             check_recent_reading(page, 3)
             check_recent_reading(phone, 2, touch=True)
+            page.get_by_role('link',name='设置',exact=True).click()
+            page.get_by_role('button',name='生成 / 重置同步码',exact=True).click()
+            code=page.get_by_label('阅读同步码',exact=True).input_value()
+            assert len(code)>=32
+            assert page.get_by_label('Web 同步地址',exact=True).input_value()==url
+            metadata=dict(title='READING ACROSS DEVICES!',url='https://example.invalid/original',
+                wordCount=9999,readAt=int(time.time()*1000))
+            before=page.request.get(url+'/api/reading-stats').json()
+            existing=next(a for a in before['articles'] if a['title']=='Reading across devices')
+            expected_words=before['totalWords']-existing['wordCount']+max(9999,existing['wordCount'])
+            for _ in range(2):
+                response=page.request.post(url+'/api/reading-sync/import',data={'articles':[metadata]},
+                    headers={'Authorization':'Bearer '+code})
+                assert response.status==200
+            for current in [page,phone]:
+                current.get_by_role('link',name='已读统计',exact=True).click()
+                expect(current.get_by_role('heading',name='已读统计',exact=True)).to_be_visible()
+                expect(current.locator('[data-stat="articles"]')).to_have_text(str(before['articleCount']))
+                expect(current.locator('[data-stat="words"]')).to_have_text(f'{expected_words:,}')
+                card=current.locator('.completed-card').filter(has_text='Reading across devices')
+                expect(card.locator('.completed-sources a')).to_have_count(2)
+                expect(card).to_contain_text('Wired_2026.11.epub')
+                expect(card.locator('.completed-sources a').last).to_have_attribute('href',metadata['url'])
+                current.get_by_role('searchbox',name='搜索已读文章').fill('example.invalid')
+                expect(current.locator('.completed-card')).to_have_count(1)
+                current.get_by_role('searchbox',name='搜索已读文章').fill('no-match')
+                expect(current.locator('.completed-card')).to_have_count(0)
+                current.get_by_role('searchbox',name='搜索已读文章').fill('')
+                width=current.evaluate('() => ({scroll:document.documentElement.scrollWidth,width:innerWidth})')
+                assert width['scroll']<=width['width'],width
+            page.get_by_role('link',name='设置',exact=True).click()
+            page.get_by_role('button',name='停用同步码',exact=True).click()
+            expect(page.locator('.sync-panel')).to_contain_text('同步已停用')
             assert not errors,errors
             assert not requests,requests
-            print('BROWSER PASS: desktop + 390px touch phone; model edit/cancel/rename/key preservation/replacement, recent expand/collapse/35 links, modal wheel isolation, saved position, live progress, word source/search/jump, isolated double-click, login, mark, vocab, discussion, sync, no overflow/errors')
+            print('BROWSER PASS: desktop + 390px touch phone; completed stats/dedup/search/source links/plugin pairing/retry; model editor, recent reading, modal wheel isolation, saved progress, wordbook, analysis, discussion; no overflow/errors')
             browser.close()
     finally:
         server.shutdown()

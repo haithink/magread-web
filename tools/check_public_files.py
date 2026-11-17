@@ -10,6 +10,7 @@ SKIP_DIRS = {'.git', '.venv', 'venv', '__pycache__', '.pytest_cache', '.idea', '
 PRIVATE_DIRS = {'data', 'runtime', 'kanduweb', 'kanduwebruntime', 'cache', 'covers',
                 'books', 'uploads', 'reading_history', 'article_states', 'discussions', 'vocab'}
 PRIVATE_NAMES = {'settings.json', 'books.json', 'web-auth.json', 'access-code.txt',
+                 'reading-stats.json', 'reading-sync-auth.json',
                  'desktop-import.json', 'id_rsa', 'id_ed25519'}
 PATTERNS = [
     ('API token pattern', re.compile(rb'\bsk-(?:proj-|ant-)?[A-Za-z0-9_-]{20,}\b')),

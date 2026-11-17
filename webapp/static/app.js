@@ -104,11 +104,14 @@ async function runJob(path, data={}, onDone, onUpdate) {
 }
 
 async function library(token) {
-  const data=await api('/library'); if(token!==state.route)return;
+  const [data,stats]=await Promise.all([api('/library'),api('/reading-stats')]); if(token!==state.route)return;
   const content=el('div');
   content.append(heading('A WINDOW TO THE WORLD','我的阅读室',`${data.books.length} 本刊物 · 阅读结果集中保存，各设备接续阅读`,[
     button('＋ 添加刊物',uploadSheet,'primary')
   ]));
+  content.append(el('a',{class:'reading-milestone',href:'#/reading-stats'},
+    el('div',{},el('span',{class:'eyebrow'},'EVERY ARTICLE COUNTS'),el('strong',{},`已读 ${stats.articleCount.toLocaleString()} 篇 · 累计 ${stats.totalWords.toLocaleString()} 词`)),
+    el('span',{},'查看阅读足迹 →')));
   if(data.recent.length) {
     const list=el('div',{class:'recent-grid',id:'recent-reading'});
     let expanded=false;
@@ -282,6 +285,11 @@ async function readerPage(bookId,index,token,startParagraph=null) {
   const find=el('input',{type:'search',placeholder:'在本文中查找…','aria-label':'查找原文'});
   const findRow=el('div',{class:'find-row',hidden:true},find,el('span',{class:'count',id:'find-count'}),button('×',()=>{find.value='';findArticle(reader,'');findRow.hidden=true;}));
   const tools=el('div',{class:'reader-toolbar'},el('a',{href:`#/book/${encodeURIComponent(bookId)}`},'← 目录'),vocabButton,
+    button(data.state==='read'?'已读 ✓':'标记已读',action(async event=>{
+      const target=event.target.closest('button');target.disabled=true;
+      try{await api(`/books/${encodeURIComponent(bookId)}/state`,{method:'POST',data:{articleIndex:index,state:'read'}});
+        reader.state='read';target.textContent='已读 ✓';toast('已计入全局已读统计');}finally{target.disabled=false;}
+    })),
     button('与 AI 讨论',action(()=>discussionSheet(reader))),button('查找',()=>{findRow.hidden=!findRow.hidden;if(!findRow.hidden)find.focus();}),
     el('span',{class:'grow'}),button('A−',()=>resizeReader(reader,-1)),button('A+',()=>resizeReader(reader,1)),
     el('a',{href:`/api/books/${encodeURIComponent(bookId)}/file`,target:'_blank',rel:'noopener'},data.ext==='pdf'?'原版 PDF ↗':'下载 EPUB ↗'),progress);
@@ -510,7 +518,7 @@ async function editWord(word='') {
 }
 
 async function settingsPage(token) {
-  const data=await api('/settings');if(token!==state.route)return;
+  const [data,sync]=await Promise.all([api('/settings'),api('/reading-sync')]);if(token!==state.route)return;
   const level=el('select',{},...Object.entries({cet4:'四级 CET-4',cet6:'六级 CET-6',toefl:'TOEFL',gre:'GRE'}).map(([k,v])=>el('option',{value:k},v)));level.value=data.vocabLevel;
   level.onchange=action(async()=>{await api('/settings',{method:'POST',data:{vocabLevel:level.value}});toast('词汇水平已保存');});
   const models=el('div');
@@ -524,7 +532,52 @@ async function settingsPage(token) {
   form.onsubmit=action(async event=>{event.preventDefault();await api('/settings',{method:'POST',data:{name:name.value,configJson:json.value}});json.value='';toast('模型配置已保存');route();});
   view.replaceChildren(heading('MAKE IT YOURS','阅读设置','模型和词汇水平由这台服务器统一管理'),
     el('div',{class:'settings-grid'},el('section',{class:'panel'},el('h2',{},'阅读偏好'),el('label',{},'默认已掌握的词汇',level),el('hr'),el('h2',{},'模型配置'),models),
-      el('section',{class:'panel'},el('h2',{},'导入模型配置'),form)));
+      el('section',{class:'panel'},el('h2',{},'导入模型配置'),form)),syncSettingsPanel(sync));
+}
+
+function syncSettingsPanel(initial) {
+  const status=el('p',{class:'muted'},initial.enabled?'同步已启用。可在 Chrome 插件中上传已读文章。':'尚未开启插件阅读同步。');
+  const output=el('div',{class:'form-stack',hidden:true});
+  const panel=el('section',{class:'panel sync-panel'},el('h2',{},'Chrome 插件阅读同步'),
+    el('p',{class:'muted'},'把网页文章的标题、原文链接、总词数和完成时间汇总到已读统计。文章正文和模型密钥不会上传。'),status,
+    el('div',{class:'row'},button('生成 / 重置同步码',action(async()=>{
+      if(initial.enabled&&!confirm('重置后，已连接的插件需要填写新同步码。继续？'))return;
+      const {token}=await api('/reading-sync',{method:'POST',data:{}});initial.enabled=true;
+      status.textContent='同步码仅在此次生成后显示，请复制到插件设置。此码只能上传阅读记录。';
+      const server=el('input',{value:location.origin,readonly:true,'aria-label':'Web 同步地址'});
+      const code=el('input',{value:token,readonly:true,'aria-label':'阅读同步码',autocomplete:'off',spellcheck:false});
+      output.replaceChildren(el('label',{},'Web 地址',server),el('label',{},'同步码',code),
+        button('复制同步码',action(async()=>{await navigator.clipboard.writeText(token);toast('同步码已复制');})));output.hidden=false;
+    }),'primary'),button('停用同步码',action(async()=>{
+      await api('/reading-sync',{method:'DELETE'});initial.enabled=false;output.replaceChildren();output.hidden=true;
+      status.textContent='同步已停用，已上传的阅读记录保留。';
+    }))),output);
+  return panel;
+}
+
+async function readingStatsPage(token) {
+  const data=await api('/reading-stats');if(token!==state.route)return;
+  const search=el('input',{type:'search',class:'search',placeholder:'搜索标题、刊物或网站…','aria-label':'搜索已读文章'});
+  const list=el('div',{class:'completed-list'}),count=el('span',{class:'count'});
+  const render=()=>{
+    const query=search.value.trim().toLocaleLowerCase();
+    const found=data.articles.filter(a=>[a.title,...a.sources.map(s=>s.source)].join(' ').toLocaleLowerCase().includes(query));
+    count.textContent=`${found.length} 篇`;
+    list.replaceChildren(...found.map(a=>el('article',{class:'completed-card'},
+      el('div',{class:'completed-heading'},el('h2',{},a.title),el('strong',{},a.wordCount?`${a.wordCount.toLocaleString()} 词`:'词数待补全')),
+      el('div',{class:'completed-meta'},el('time',{datetime:new Date(a.readAt).toISOString()},new Date(a.readAt).toLocaleDateString()),
+        el('span',{},a.sources.length>1?`${a.sources.length} 个出处 · 标题去重后计为 1 篇`:'已读文章')),
+      el('div',{class:'completed-sources'},...a.sources.map(s=>el('a',s.kind==='chrome'?{href:s.url,target:'_blank',rel:'noopener noreferrer'}:
+        {href:linkFor(s.bookId,s.articleIndex)},`${s.kind==='chrome'?'网页':'刊物'} · ${s.source}${s.kind==='chrome'?' ↗':' →'}`))))));
+    if(!found.length)list.append(empty(query?'没有匹配的已读文章':'你的阅读积累，从这里开始',
+      '读到文章结尾或标记为已读，即可加入；Chrome 网页文章也可以同步到这里。'));
+  };
+  search.oninput=render;
+  view.replaceChildren(heading('YOUR READING JOURNEY','已读统计','每读完一篇，都是一次积累。跨刊物、跨网页，记录你的阅读足迹。'),
+    el('div',{class:'reading-totals'},el('div',{},el('strong',{'data-stat':'articles'},data.articleCount.toLocaleString()),el('span',{},'已读文章 · 按标题去重')),
+      el('div',{},el('strong',{'data-stat':'words'},data.totalWords.toLocaleString()),el('span',{},'累计阅读词数'))),
+    el('p',{class:'count'},'标题忽略大小写、空白和标点差异；同标题各出处合并，词数取最大值，不重复累加。'),
+    el('div',{class:'filters'},search,count),list);render();
 }
 
 function editModel(initial) {
@@ -570,6 +623,7 @@ async function route() {
     else if(parts[0]==='read'&&parts[1]&&/^\d+$/.test(parts[2]))await readerPage(parts[1],Number(parts[2]),token,startParagraph);
     else if(parts[0]==='wordbook')await wordbookPage(token);
     else if(parts[0]==='settings')await settingsPage(token);
+    else if(parts[0]==='reading-stats')await readingStatsPage(token);
     else await library(token);
   }catch(error){if(token===state.route&&state.csrf)view.replaceChildren(empty('暂时无法打开',error.message),button('重试',()=>route(),'primary'));}
 }

@@ -3,6 +3,7 @@ from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 import json
+import hashlib
 from pathlib import Path
 import re
 import secrets
@@ -20,6 +21,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 from kandu import core_config as config, core_parsers as store, core_gen as gen
 from kandu import core_llm as llm, core_wordbook as wordbook, core_dict, core_discussion as discussion
 from webapp import __version__
+from webapp import reading_stats
 
 STATIC = Path(__file__).parent / 'static'
 BOOK_ID = re.compile(r'[A-Za-z0-9._-]{1,220}\Z')
@@ -163,6 +165,18 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=()):
         hostname = urlsplit(request.host_url).hostname
         if not hostname or hostname.lower() not in hosts:
             abort(400, '此访问地址尚未在服务端启用')
+        if request.path == '/api/reading-sync/import' and request.method == 'POST':
+            if request.content_length is None or request.content_length > 128 * 1024:
+                abort(413, '同步数据过大')
+            credential = request.headers.get('Authorization', '')
+            saved = store._json_read(root / 'reading-sync-auth.json') or {}
+            supplied = hashlib.sha256(credential[7:].encode()).hexdigest() if credential.startswith('Bearer ') else ''
+            if not saved.get('tokenHash') or not secrets.compare_digest(supplied, saved['tokenHash']):
+                abort(401, '阅读同步码无效，请在 Web 设置中重新生成')
+            origin = request.headers.get('Origin', '')
+            if origin and not origin.startswith('chrome-extension://') and origin.rstrip('/') != request.host_url.rstrip('/'):
+                abort(403, '拒绝跨站请求')
+            return
         if request.method not in ('GET', 'HEAD', 'OPTIONS'):
             origin = request.headers.get('Origin')
             if origin:
@@ -253,6 +267,36 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=()):
         recent.sort(key=lambda r: r['lastReadAt'], reverse=True)
         return jsonify(books=books, recent=recent[:80])
 
+    @app.get('/api/reading-stats')
+    def completed_reading():
+        with data_lock:
+            return jsonify(reading_stats.summary())
+
+    @app.get('/api/reading-sync')
+    def reading_sync_status():
+        saved = store._json_read(root / 'reading-sync-auth.json') or {}
+        return jsonify(enabled=bool(saved.get('tokenHash')))
+
+    @app.post('/api/reading-sync')
+    def reading_sync_pair():
+        token = secrets.token_urlsafe(32)
+        with data_lock:
+            store._atomic_json_write(root / 'reading-sync-auth.json',
+                                     dict(tokenHash=hashlib.sha256(token.encode()).hexdigest()))
+        return jsonify(token=token)
+
+    @app.delete('/api/reading-sync')
+    def reading_sync_revoke():
+        with data_lock:
+            store._atomic_json_write(root / 'reading-sync-auth.json', {})
+        return jsonify(ok=True)
+
+    @app.post('/api/reading-sync/import')
+    def reading_sync_import():
+        with data_lock:
+            count = reading_stats.import_records(payload().get('articles'))
+        return jsonify(accepted=count)
+
     @app.get('/api/books/<book_id>/cover')
     def cover(book_id):
         meta = book(book_id)
@@ -284,9 +328,10 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=()):
         index = data.get('articleIndex')
         if type(index) is not int:
             abort(400, '文章编号无效')
-        article(book_id, index)
+        meta, art = article(book_id, index)
         with data_lock:
             result = store.set_article_state(book_id, index, data.get('state'))
+            reading_stats.mark_web(meta, art, data.get('state') == 'read')
         return jsonify(states=result)
 
     @app.get('/api/books/<book_id>/articles/<int:index>')
@@ -300,7 +345,7 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=()):
 
     @app.post('/api/books/<book_id>/articles/<int:index>/progress')
     def save_progress(book_id, index):
-        _, art = article(book_id, index)
+        meta, art = article(book_id, index)
         data = payload()
         para = data.get('paragraphIndex')
         offset = data.get('paragraphOffset', 0)
@@ -309,10 +354,14 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=()):
         offset = min(offset, len(art['paragraphs'][para]))
         progress = (sum(len(p) for p in art['paragraphs'][:para]) + offset) / max(1, sum(len(p) for p in art['paragraphs']))
         with data_lock:
+            previous = store.load_reading_history(book_id).get(str(index), {})
             record = store.save_reading_progress(book_id, index, dict(title=art['title'], titleZh='',
                 paragraphIndex=para, paragraphOffset=offset, paragraphCount=len(art['paragraphs']),
                 paragraphStart=art['paragraphs'][para][:100], wordCount=len(gen._TOKEN.findall(' '.join(art['paragraphs']))),
                 progress=progress, atStart=para == 0 and offset == 0, atEnd=progress >= .995))
+            if record['atEnd'] and not previous.get('atEnd'):
+                reading_stats.mark_web(meta, art, True)
+                store.set_article_state(book_id, index, 'read')
         return jsonify(record=record)
 
     @app.get('/api/books/<book_id>/articles/<int:index>/vocab')
