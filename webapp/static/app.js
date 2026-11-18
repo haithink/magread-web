@@ -257,10 +257,39 @@ async function uploadSheet() {
 }
 
 const labels={unread:'未读',read:'已读',uninterested:'不感兴趣'};
+function issueRecentReading(articles,articleLink,isSeries) {
+  const list=el('div',{class:'issue-recent-list',id:'issue-recent-list'});
+  const count=el('span',{class:'count'});
+  let expanded=false;
+  const more=button('更多',()=>{expanded=!expanded;render();},'text-button');
+  more.setAttribute('aria-controls','issue-recent-list');
+  const section=el('section',{class:'issue-recent',id:'issue-recent',hidden:true,'aria-label':isSeries?'本系列继续阅读':'本刊继续阅读'},
+    el('div',{class:'issue-recent-heading'},el('h2',{},'继续阅读'),count,more),list);
+  function render() {
+    // Keep ongoing reading accessible even if search, tags or duplicate hiding
+    // exclude its directory card. Only this publication's history is considered.
+    const recent=articles.filter(a=>a.history?.lastReadAt>0&&a.state==='unread'&&!a.history.atEnd&&a.history.progress<.995)
+      .sort((a,b)=>b.history.lastReadAt-a.history.lastReadAt||a.index-b.index);
+    section.hidden=!recent.length;
+    if(recent.length<=3)expanded=false;
+    count.textContent=`${isSeries?'本系列':'本刊'} · ${recent.length} 篇进行中`;
+    more.hidden=recent.length<=3;more.textContent=expanded?'收起':'更多';more.setAttribute('aria-expanded',String(expanded));
+    list.replaceChildren(...recent.slice(0,expanded?recent.length:3).map(a=>{
+      const h=a.history,date=new Date(h.lastReadAt),title=a.titleEn||h.title;
+      return el('a',{class:'issue-recent-link',href:articleLink(a),'aria-label':'继续阅读：'+title,title:[title,a.titleZh].filter(Boolean).join('\n')},
+        el('strong',{class:'issue-recent-title'},title),
+        el('time',{datetime:date.toISOString()},date.toLocaleString('zh-CN',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'})),
+        el('span',{class:'issue-recent-position'},`第 ${h.paragraphIndex+1} 段 · ${Math.round(h.progress*100)}%`),
+        el('span',{class:'issue-recent-arrow','aria-hidden':'true'},'→'));
+    }));
+  }
+  return {section,render};
+}
 async function digestPage(bookId,token) {
   const data=await api('/books/'+encodeURIComponent(bookId));if(token!==state.route)return;
   const isSeries=data.sourceType==='podcast-series';
   const articleLink=a=>linkFor(a.bookId||bookId,a.articleIndex??a.index);
+  const recent=issueRecentReading(data.articles,articleLink,isSeries);
   const q=el('input',{class:'search',type:'search',placeholder:isSeries?'搜索期号、嘉宾、摘要、标签…':'搜索标题、摘要、标签…','aria-label':'搜索文章'});
   const topicKey='kandu-topic:'+bookId;
   let topic=sessionStorage.getItem(topicKey)||'';
@@ -318,6 +347,7 @@ async function digestPage(bookId,token) {
     const b=button(label,()=>{filter=key;render();});tabButtons.set(key,b);tabs.append(b);
   }
   function render(){
+    recent.render();
     const visible=visibleArticles(),tagCounts=new Map();
     for(const a of visible)for(const tag of a.tags||[])tagCounts.set(tag,(tagCounts.get(tag)||0)+1);
     if(topic&&!tagCounts.has(topic)){topic='';sessionStorage.removeItem(topicKey);}
@@ -341,7 +371,7 @@ async function digestPage(bookId,token) {
       button('生成 / 补缺摘要',action(()=>runJob(`/books/${encodeURIComponent(bookId)}/generate-digest`,{},()=>{if(token===state.route)route();})),'primary')
     ])),...(data.sourceUrl?[el('div',{class:'podcast-provenance'},el('a',{href:data.sourceUrl,target:'_blank',rel:'noopener noreferrer'},isSeries?'播客官网 ↗':'官方 Transcript ↗'),
       data.excerpted?el('span',{class:'count'},'摘要基于覆盖全文的分段摘录；正文为完整 Transcript。'):null)]:[]),
-    el('div',{class:'filters'},q,duplicateCount?el('label',{class:'duplicate-toggle'},showDuplicates,`显示重复文章（${duplicateCount}）`):null),topics,tabs,grid);
+    recent.section,el('div',{class:'filters'},q,duplicateCount?el('label',{class:'duplicate-toggle'},showDuplicates,`显示重复文章（${duplicateCount}）`):null),topics,tabs,grid);
   render();
 }
 
