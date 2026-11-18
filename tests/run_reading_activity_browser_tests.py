@@ -226,16 +226,36 @@ def main():
                     held.pop().continue_()
                     expect(page.locator('#reader-reading-time')).to_contain_text('已读停计时')
                     page.unroute('**/api/books/sample/state')
-                    expect(timer).to_be_disabled()
+                    expect(timer).to_be_enabled()
+                    expect(timer).to_have_text('继续计时')
                     page.wait_for_function('() => ReadingSync.pending()===0')
                     completed=activity.article_timing('sample',0)['activeMs']
                     now[0]+=30_000;page.clock.run_for(30_000)
                     page.locator('#para-4').scroll_into_view_if_needed()
                     assert page.evaluate('state.reader.clock.elapsedMs')==elapsed
                     assert activity.article_timing('sample',0)['activeMs']==completed
+                    # Completed articles can be reread without changing their
+                    # completion record. The timer remains a working toggle.
+                    timer.click()
+                    expect(page.locator('#reader-reading-time')).to_contain_text('计时中')
+                    expect(timer).to_have_text('暂停计时')
+                    assert page.evaluate('state.reader.state')=='read'
+                    now[0]+=15_000;page.clock.run_for(15_000)
+                    page.wait_for_function('() => ReadingSync.pending()===0')
+                    assert page.evaluate('state.reader.clock.elapsedMs')>elapsed
+                    timer.click()
+                    expect(page.locator('#reader-reading-time')).to_contain_text('已暂停')
+                    expect(timer).to_have_text('继续计时')
+                    paused_elapsed=page.evaluate('state.reader.clock.elapsedMs')
+                    page.wait_for_function('() => ReadingSync.pending()===0')
+                    completed=activity.article_timing('sample',0)['activeMs']
+                    now[0]+=15_000;page.clock.run_for(15_000)
+                    assert page.evaluate('state.reader.clock.elapsedMs')==paused_elapsed
+                    assert activity.article_timing('sample',0)['activeMs']==completed
                     page.reload()
                     expect(page.locator('#reader-reading-time')).to_contain_text('已读停计时')
-                    expect(page.locator('#reading-time-toggle')).to_be_disabled()
+                    expect(page.locator('#reading-time-toggle')).to_be_enabled()
+                    expect(page.locator('#reading-time-toggle')).to_have_text('继续计时')
                     now[0]+=30_000;page.clock.run_for(30_000)
                     page.wait_for_function('() => ReadingSync.pending()===0')
                     assert activity.article_timing('sample',0)['activeMs']==completed

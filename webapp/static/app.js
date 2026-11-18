@@ -753,7 +753,7 @@ function pauseVocabularyGeneration(path) {
   };
 }
 function readingClockReason(reader,now=performance.now()) {
-  if(reader.state==='read')return '已读停计时';
+  if(reader.clock.completedPaused)return '已读停计时';
   if(reader.markingRead)return '正在标记已读';
   if(reader.clock.manualPaused)return '已暂停';
   if(document.hidden)return '后台暂停';
@@ -765,13 +765,21 @@ function readingClockReason(reader,now=performance.now()) {
   return '计时中';
 }
 function setReaderState(reader,value){
-  readingClockTick(reader);reader.state=value;readingClockTick(reader);
+  readingClockTick(reader);reader.state=value;
+  if(reader.clock)reader.clock.completedPaused=value==='read';
+  readingClockTick(reader);updateReadingClockControl(reader);
   if(state.reader!==reader)return;
-  const timer=$('#reading-time-toggle'),read=value==='read';
-  if(timer){timer.disabled=read;timer.textContent=read?'已读停计时':reader.clock?.manualPaused?'继续计时':'暂停计时';
-    timer.setAttribute('aria-pressed',String(read||!!reader.clock?.manualPaused));}
+  const read=value==='read';
   const mark=$('#reader-mark-read');if(mark)mark.textContent=read?'已读 ✓':'标记已读';
   if(read)flushReadingClock(reader);
+}
+function updateReadingClockControl(reader){
+  if(state.reader!==reader)return;
+  const timer=$('#reading-time-toggle');if(!timer)return;
+  const paused=!!(reader.clock?.completedPaused||reader.clock?.manualPaused);
+  timer.textContent=paused?'继续计时':'暂停计时';
+  timer.setAttribute('aria-pressed',String(paused));
+  timer.title=reader.clock?.completedPaused?'文章已读，点击可继续本次重读计时，保留已读标记。':'暂停期间不累计阅读时间；点击继续计时后恢复。';
 }
 function readingClockTick(reader=state.reader) {
   if(!reader?.clock||reader.clock.stopped)return;
@@ -806,7 +814,7 @@ function startReadingClock(reader,initialPosition) {
   const now=performance.now();
   reader.clock={id:readingId(),
     sequence:0,elapsedMs:0,syncedElapsed:0,serverMs:reader.readingTiming?.activeMs||0,
-    lastSample:now,lastInteraction:now,manualPaused:false,stopped:false};
+    lastSample:now,lastInteraction:now,manualPaused:false,completedPaused:reader.state==='read',stopped:false};
   const clock=reader.clock;
   clock.interaction=event=>{if(event.isTrusted){readingClockTick(reader);clock.lastInteraction=performance.now();}};
   for(const name of ['pointerdown','pointermove','keydown','wheel','touchstart'])window.addEventListener(name,clock.interaction,{passive:true});
@@ -1151,10 +1159,11 @@ async function readerPage(bookId,index,token,startParagraph=null) {
   const find=el('input',{type:'search',placeholder:'在本文中查找…','aria-label':'查找原文'});
   const findRow=el('div',{class:'find-row',hidden:true},find,el('span',{class:'count',id:'find-count'}),button('×',()=>{find.value='';findArticle(reader,'');findRow.hidden=true;}));
   const pauseTimer=button('暂停计时',()=>{
-    if(reader.state==='read'||reader.markingRead)return;
-    readingClockTick(reader);reader.clock.manualPaused=!reader.clock.manualPaused;
-    reader.clock.lastInteraction=performance.now();pauseTimer.textContent=reader.clock.manualPaused?'继续计时':'暂停计时';
-    pauseTimer.setAttribute('aria-pressed',String(reader.clock.manualPaused));
+    if(reader.markingRead)return;
+    readingClockTick(reader);
+    if(reader.clock.completedPaused){reader.clock.completedPaused=false;reader.clock.manualPaused=false;}
+    else reader.clock.manualPaused=!reader.clock.manualPaused;
+    reader.clock.lastInteraction=performance.now();updateReadingClockControl(reader);
     readingClockTick(reader);flushReadingClock(reader);
   });pauseTimer.id='reading-time-toggle';pauseTimer.setAttribute('aria-pressed','false');
   pauseTimer.title='暂停期间不累计阅读时间；点击继续计时后恢复。';
