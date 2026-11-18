@@ -564,23 +564,25 @@ function issueRecentReading(articles,articleLink,isSeries) {
   let expanded=false;
   const more=button('更多',()=>{expanded=!expanded;render();},'text-button');
   more.setAttribute('aria-controls','issue-recent-list');
-  const section=el('section',{class:'issue-recent',id:'issue-recent',hidden:true,'aria-label':isSeries?'本系列继续阅读':'本刊继续阅读'},
-    el('div',{class:'issue-recent-heading'},el('h2',{},'继续阅读'),count,more),list);
+  const section=el('section',{class:'issue-recent',id:'issue-recent',hidden:true,'aria-label':isSeries?'本系列最近阅读':'本刊最近阅读'},
+    el('div',{class:'issue-recent-heading'},el('h2',{},'最近阅读'),count,more),list);
   function render() {
-    // Keep ongoing reading accessible even if search, tags or duplicate hiding
-    // exclude its directory card. Only this publication's history is considered.
-    const recent=articles.filter(a=>a.history?.lastReadAt>0&&a.state==='unread'&&!a.history.atEnd&&a.history.progress<.995)
+    // Completion does not remove a reading shortcut: readers also return to
+    // finished articles. Search, tags and duplicate hiding stay independent.
+    const recent=articles.filter(a=>a.history?.lastReadAt>0&&a.state!=='uninterested')
       .sort((a,b)=>b.history.lastReadAt-a.history.lastReadAt||a.index-b.index);
     section.hidden=!recent.length;
     if(recent.length<=3)expanded=false;
-    count.textContent=`${isSeries?'本系列':'本刊'} · ${recent.length} 篇进行中`;
+    count.textContent=`${isSeries?'本系列':'本刊'} · ${recent.length} 篇`;
     more.hidden=recent.length<=3;more.textContent=expanded?'收起':'更多';more.setAttribute('aria-expanded',String(expanded));
     list.replaceChildren(...recent.slice(0,expanded?recent.length:3).map(a=>{
       const h=a.history,date=new Date(h.lastReadAt),title=a.titleEn||h.title;
-      return el('a',{class:'issue-recent-link',href:articleLink(a),'aria-label':'继续阅读：'+title,title:[title,a.titleZh].filter(Boolean).join('\n')},
+      return el('a',{class:'issue-recent-link',href:articleLink(a),'aria-label':'返回阅读：'+title,title:[title,a.titleZh].filter(Boolean).join('\n')},
         el('strong',{class:'issue-recent-title'},title),
         el('time',{datetime:date.toISOString()},date.toLocaleString('zh-CN',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'})),
-        el('span',{class:'issue-recent-position'},`第 ${h.paragraphIndex+1} 段 · ${Math.round(h.progress*100)}%`),
+        el('span',{class:'issue-recent-position'},
+          el('span',{class:'issue-recent-state'},a.state==='read'?'已读':h.atEnd||h.progress>=.995?'已到文末':'阅读中'),
+          el('span',{},`第 ${h.paragraphIndex+1} 段 · ${Math.round(h.progress*100)}%`)),
         el('span',{class:'issue-recent-arrow','aria-hidden':'true'},'→'));
     }));
   }
