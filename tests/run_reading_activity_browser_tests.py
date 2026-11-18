@@ -8,6 +8,7 @@ from unittest.mock import patch
 from wsgiref.simple_server import make_server
 
 from playwright.sync_api import sync_playwright, expect
+from browser_helpers import reader_button
 from run_web_tests import WebTests, config, store, llm
 from webapp import reading_activity as activity, reading_stats
 
@@ -42,7 +43,7 @@ def check_vocabulary_waits(page, now):
                 now[0]+=15_000;page.clock.run_for(15_000)
                 assert page.evaluate('() => state.reader.clock.elapsedMs')==elapsed,'Generating vocabulary must pause'
                 if terminal=='stopped':
-                    page.get_by_role('button',name='暂停计时',exact=True).click()
+                    reader_button(page,'暂停计时').click()
                 job.update(state=terminal,status='模拟生成结束')
                 now[0]+=1000;page.clock.run_for(1000)
             page.wait_for_function('() => state.vocabWaits.size===0')
@@ -57,7 +58,7 @@ def check_vocabulary_waits(page, now):
                 page.locator('#sheet-close').click()
             if terminal=='stopped':
                 expect(page.locator('#reader-reading-time')).to_contain_text('已暂停')
-                page.get_by_role('button',name='继续计时',exact=True).click()
+                reader_button(page,'继续计时').click()
             # Failed/stopped generation must not leave the reader permanently paused.
             page.locator('#reader-reading-time').click()
             now[0]+=1000;page.clock.run_for(1000)
@@ -150,7 +151,7 @@ def main():
                             page.wait_for_function('(elapsed) => state.reader.clock.syncedElapsed>=elapsed',arg=step*15_000-1000)
                     page.unroute('**/reading-time',lose_first_reply)
                     assert page.evaluate('() => state.reader.clock.serverMs')==activity.article_timing('sample',0)['activeMs']
-                    page.get_by_role('button',name='暂停计时',exact=True).click()
+                    reader_button(page,'暂停计时').click()
                     expect(page.locator('#reader-reading-time')).to_contain_text('已暂停')
                     page.wait_for_function('() => !state.reader.clock.sending')
                     paused=activity.article_timing('sample',0)['activeMs']
@@ -158,7 +159,7 @@ def main():
                     now[0]+=60_000;page.clock.run_for(60_000)
                     page.wait_for_function('() => !state.reader.clock.sending')
                     assert activity.article_timing('sample',0)['activeMs']==paused
-                    page.get_by_role('button',name='继续计时',exact=True).click()
+                    reader_button(page,'继续计时').click()
                     check_vocabulary_waits(page,now)
                     # Headless Chromium keeps all pages foreground. Emulate the
                     # platform visibility/focus change, leaving clock code intact.
@@ -195,7 +196,7 @@ def main():
                     idle=activity.article_timing('sample',0)['activeMs']
                     now[0]+=30_000;page.clock.run_for(30_000)
                     assert activity.article_timing('sample',0)['activeMs']==idle
-                    page.get_by_role('button',name='标记已读',exact=True).click()
+                    reader_button(page,'标记已读').click()
                     page.get_by_role('link',name='已读统计',exact=True).click()
                     expect(page.get_by_role('heading',name='已读统计',exact=True)).to_be_visible()
                     expect(page.locator('.reading-chart')).to_have_count(2)

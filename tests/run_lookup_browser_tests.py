@@ -34,8 +34,11 @@ def select_word(page, paragraph, at_bottom=False):
     }''')
     assert metrics['left']>=9 and metrics['right']<=metrics['width']-9,metrics
     assert metrics['top']>=9 and metrics['bottom']<=metrics['height']-9,metrics
-    assert metrics['gap']<=11,metrics
-    if at_bottom:assert metrics['bottom']<metrics['wordTop'],metrics
+    if page.evaluate("matchMedia('(pointer:coarse)').matches"):
+        assert metrics['bottom']>=metrics['height']-11,metrics
+    else:
+        assert metrics['gap']<=11,metrics
+        if at_bottom:assert metrics['bottom']<metrics['wordTop'],metrics
     return page.evaluate('''() => ({y:scrollY,progress:document.querySelector('#reader-progress-bar').value,
         paragraph:document.querySelector('#reader-paragraph').textContent})''')
 
@@ -76,6 +79,7 @@ def main():
             for mobile in [False,True]:
                 context=browser.new_context(viewport={'width':390 if mobile else 1440,'height':844 if mobile else 1000},
                     is_mobile=mobile,has_touch=mobile)
+                context.add_init_script("localStorage.setItem('kandu-touch-mode','select')")
                 page=context.new_page();page.on('pageerror',lambda error:errors.append(str(error)))
                 page.goto(base+'/#/read/sample/0')
                 page.locator('#password').fill(WebTests.authcode);page.locator('#login-form button').click()

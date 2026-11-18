@@ -67,6 +67,7 @@ def main():
                 store.save_vocab('sample',cached_vocab())
                 context=browser.new_context(viewport=dict(width=390 if mobile else 1440,height=900),
                                             is_mobile=mobile,has_touch=mobile)
+                context.add_init_script("localStorage.setItem('kandu-touch-mode','select')")
                 page=context.new_page();page.on('pageerror',lambda e:errors.append(str(e)))
                 jobs={};submissions=[]
                 def start(route):

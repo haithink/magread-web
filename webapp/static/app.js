@@ -14,6 +14,23 @@ const el = (tag, attrs = {}, ...children) => {
 const button = (text, callback, cls = '') => el('button', {type:'button', class:cls, onclick:callback}, text);
 const state = {csrf:'', route:0, reader:null, selection:null, activeJobs:new Map(), jobObservers:new Map(), vocabWaits:new Map(), sheet:0, sheetWait:null};
 const view = $('#app');
+function syncVisualViewport() {
+  const viewport=window.visualViewport;
+  document.documentElement.style.setProperty('--visual-height',(viewport?.height||innerHeight)+'px');
+  document.documentElement.style.setProperty('--visual-top',(viewport?.offsetTop||0)+'px');
+  const compact=matchMedia('(max-width:600px), (pointer:coarse) and (max-width:1000px) and (max-height:500px)').matches;
+  $('#sheet').classList.toggle('keyboard-open',compact&&viewport?.height<innerHeight*.78);
+}
+window.visualViewport?.addEventListener('resize',syncVisualViewport,{passive:true});
+window.visualViewport?.addEventListener('scroll',syncVisualViewport,{passive:true});
+window.addEventListener('resize',syncVisualViewport,{passive:true});syncVisualViewport();
+function readingViewport() {
+  const viewport=window.visualViewport,style=getComputedStyle(document.documentElement);
+  const inset=name=>parseFloat(style.getPropertyValue('--safe-'+name))||0;
+  return {left:(viewport?.offsetLeft||0)+inset('left'),top:(viewport?.offsetTop||0)+inset('top'),
+    width:(viewport?.width||innerWidth)-inset('left')-inset('right'),
+    height:(viewport?.height||innerHeight)-inset('top')-inset('bottom')};
+}
 // Older installed reading extensions also listen on document. Keep our reader and
 // dialog mouse events local so one gesture cannot start another model request.
 // selectionchange still reaches document for our own selection toolbar.
@@ -75,9 +92,7 @@ function centerSheet() {
 }
 function positionSheetWait() {
   const wait=state.sheetWait;if(!wait||wait.card.hidden)return;
-  const viewport=window.visualViewport;
-  const left=viewport?.offsetLeft||0,top=viewport?.offsetTop||0;
-  const width=viewport?.width||innerWidth,height=viewport?.height||innerHeight;
+  const {left,top,width,height}=readingViewport();
   const card=wait.card,body=$('#reader-body');if(!body)return;
   card.style.width=Math.min(272,width-24)+'px';
   const bounds=card.getBoundingClientRect(),prose=body.getBoundingClientRect();
@@ -109,7 +124,7 @@ function dockSheet(sheet) {
 function waitForSheet(sheet, reader, paragraph=null, status='正在准备请求…') {
   if(sheet!==state.sheet||state.reader!==reader)return;
   if(!state.sheetWait) {
-    const selection=getSelection(),range=selection&&!selection.isCollapsed?selection.getRangeAt(0).cloneRange():null;
+    const selection=getSelection(),range=selection&&!selection.isCollapsed?selection.getRangeAt(0).cloneRange():reader.selectionRange?.cloneRange()||null;
     const title=el('strong',{},$('#sheet-title').textContent),label=el('p',{class:'sheet-wait-status','aria-live':'polite'},status);
     const card=el('aside',{id:'sheet-wait',role:'region','aria-label':'AI 请求进度'},
       el('div',{class:'sheet-wait-head'},el('span',{class:'spinner','aria-hidden':'true'}),title,
@@ -147,6 +162,7 @@ function showSheet(title, content, wait=null) {
   else centerSheet();
   window.scrollTo({left:x,top:y,behavior:'instant'});
   const selectionBar=$('#selection-tools');if(selectionBar)selectionBar.hidden=true;
+  if(state.reader)clearReaderSelection(state.reader);
   return state.sheet;
 }
 $('#sheet-close').before(el('button',{id:'sheet-background',type:'button',hidden:true,onclick:()=>dockSheet(state.sheet)},'继续阅读'));
@@ -159,6 +175,7 @@ $('#logout').onclick = action(async () => { if(state.reader){state.reader.hoverC
 
 function showLogin() {
   state.reader?.hoverCleanup?.();
+  state.reader?.touchCleanup?.();
   if(state.reader)stopReadingClock(state.reader,false);
   $('#navigation').hidden = true;
   closeSheet();
@@ -591,16 +608,115 @@ function selectedQuote() {
   const leading=selection.toString().match(/^\s*/)[0];
   return {quote,paragraph:Number(node.dataset.index),start:[...prefix.toString()].length+[...leading].length};
 }
+function clearReaderSelection(reader,clearNative=false) {
+  reader.touchSelection=null;reader.selectionRange=null;state.selection=null;
+  window.CSS?.highlights?.delete('kandu-touch-selection');
+  const bar=$('#selection-tools');if(bar)bar.hidden=true;
+  if(clearNative)getSelection()?.removeAllRanges();
+}
+function showReaderSelection(reader,chosen,range,touch=false) {
+  reader.hoverHide?.();state.selection=chosen;reader.selectionRange=range;
+  reader.touchSelection=touch?chosen:null;
+  window.CSS?.highlights?.delete('kandu-touch-selection');
+  if(touch&&supportsVocabHighlights())CSS.highlights.set('kandu-touch-selection',new Highlight(range));
+  const bar=$('#selection-tools');bar.hidden=false;bar.classList.toggle('touch-selection',touch);
+  $('span',bar).textContent=chosen.quote;
+  $('#selection-expand').hidden=!touch;
+  const whole=touch&&chosen.quote===sentenceSelection(reader,chosen).quote;
+  $('#selection-expand').disabled=whole;$('#selection-expand').textContent=whole?'已选整句':'选整句';
+  positionSelectionBar(reader);
+}
+function sentenceSelection(reader,chosen) {
+  const text=reader.article.paragraphs[chosen.paragraph];
+  const at=Number.isInteger(chosen.start)?[...text].slice(0,chosen.start).join('').length:text.indexOf(chosen.quote);
+  const segments=typeof Intl.Segmenter==='function'?[...new Intl.Segmenter('en',{granularity:'sentence'}).segment(text)]
+    :(text.match(/[^.!?]+[.!?]+["'’”]?|[^.!?]+$/g)||[text]).map((segment,i,all)=>({segment,index:all.slice(0,i).join('').length}));
+  const found=segments.find(s=>at>=s.index&&at<s.index+s.segment.length);
+  const raw=found?.segment||text,start=(found?.index||0)+(raw.length-raw.trimStart().length),quote=raw.trim();
+  return {quote,paragraph:chosen.paragraph,start:[...text.slice(0,start)].length};
+}
+function installTouchReading(reader,body,toggle) {
+  const controller=new AbortController(),options={signal:controller.signal};
+  const media=matchMedia('(pointer:coarse)');let touch=null;
+  const cancelPress=()=>{touch=null;body.classList.remove('point-press');};
+  reader.pointMode=localStorage.getItem('kandu-touch-mode')!=='select';
+  const update=()=>{
+    reader.pointActive=media.matches&&reader.pointMode;
+    body.classList.toggle('point-reading',reader.pointActive);
+    toggle.textContent=reader.pointActive?'切换为系统选文':'切换为点词';
+    toggle.setAttribute('aria-pressed',String(reader.pointActive));
+    const help=$('#touch-reading-help');if(help)help.textContent=reader.pointActive?
+      '轻点单词，可查词、选整句或提问。「更多」中可切换系统选文。':'长按文字并拖动选区，可选短语、复制；刊读操作栏显示在屏幕底部。';
+  };
+  toggle.onclick=()=>{
+    cancelPress();
+    clearReaderSelection(reader,true);reader.pointMode=!reader.pointMode;
+    localStorage.setItem('kandu-touch-mode',reader.pointMode?'point':'select');update();
+    $('.reader-toolbar')?.classList.remove('options-open');$('#reader-more-toggle')?.setAttribute('aria-expanded','false');
+    toast(reader.pointActive?'点词模式：轻点单词，再选查词、整句或提问。':'系统选文：长按并拖动选区，可选短语和复制文字。');
+  };
+  media.addEventListener('change',update,options);update();
+  body.addEventListener('contextmenu',event=>{
+    if(reader.pointActive&&event.target.closest('.paragraph p'))event.preventDefault();
+  },options);
+  body.addEventListener('selectstart',event=>{
+    const target=event.target instanceof Element?event.target:event.target.parentElement;
+    if(reader.pointActive&&target?.closest('.paragraph p'))event.preventDefault();
+  },options);
+  body.addEventListener('pointerdown',event=>{
+    cancelPress();
+    if(!reader.pointActive||event.pointerType==='mouse'||!event.isPrimary||event.button!==0)return;
+    const p=event.target.closest('.paragraph p');if(!p)return;
+    touch={id:event.pointerId,x:event.clientX,y:event.clientY,time:performance.now(),scroll:scrollY,p};
+    // WebKit skips Custom Highlight painting on user-select:none text. Suppress
+    // native selection only during the press, so existing vocabulary and the
+    // tapped range remain painted after release. Pan/pinch keep browser defaults.
+    body.classList.add('point-press');
+  },{...options,passive:true});
+  body.addEventListener('pointermove',event=>{
+    if(touch&&Math.hypot(event.clientX-touch.x,event.clientY-touch.y)>10)cancelPress();
+  },{...options,passive:true});
+  body.addEventListener('pointercancel',cancelPress,options);
+  body.addEventListener('pointerup',event=>{
+    const start=touch;cancelPress();
+    if(!start||event.pointerId!==start.id||performance.now()-start.time>550||Math.abs(scrollY-start.scroll)>3||$('#sheet').open)return;
+    const caret=document.caretPositionFromPoint?.(event.clientX,event.clientY);
+    const fallback=caret?null:document.caretRangeFromPoint?.(event.clientX,event.clientY);
+    const node=caret?.offsetNode||fallback?.startContainer,offset=caret?.offset??fallback?.startOffset;
+    if(!node||!start.p.contains(node))return;
+    const prefix=document.createRange();prefix.selectNodeContents(start.p);prefix.setEnd(node,offset);
+    const text=start.p.textContent,at=prefix.toString().length;
+    const word=vocabHoverTokens(text).find(t=>at>=t.start&&at<=t.end);
+    const range=word&&vocabHoverRange(start.p,word.start,word.end);
+    if(!range||![...range.getClientRects()].some(r=>event.clientX>=r.left-1&&event.clientX<=r.right+1&&event.clientY>=r.top&&event.clientY<=r.bottom)){
+      clearReaderSelection(reader);return;
+    }
+    showReaderSelection(reader,{quote:text.slice(word.start,word.end),paragraph:Number(start.p.closest('.paragraph').dataset.index),
+      start:[...text.slice(0,word.start)].length},range,true);
+  },options);
+  // A gesture that becomes a pan/pinch must never turn into a lookup.
+  document.addEventListener('pointerdown',event=>{
+    if(!event.isPrimary)cancelPress();
+    if(reader.touchSelection&&!event.target.closest('#selection-tools,.paragraph p'))clearReaderSelection(reader);
+    if(!event.target.closest('.reader-toolbar')){
+      $('.reader-toolbar')?.classList.remove('options-open');$('#reader-more-toggle')?.setAttribute('aria-expanded','false');
+    }
+  },{...options,passive:true});
+  document.addEventListener('keydown',event=>{
+    if(event.key!=='Escape'||$('#sheet').open)return;
+    clearReaderSelection(reader);$('.reader-toolbar')?.classList.remove('options-open');$('#reader-more-toggle')?.setAttribute('aria-expanded','false');
+  },options);
+  window.addEventListener('blur',cancelPress,options);
+  document.addEventListener('visibilitychange',()=>{if(document.hidden)cancelPress();},options);
+  reader.touchCleanup=()=>{cancelPress();controller.abort();clearReaderSelection(reader);};
+}
 function selectionBar(reader) {
   reader.hoverHide?.();
   if($('#sheet').open)return;
   const selection=selectedQuote(),bar=$('#selection-tools');
+  if(!selection&&reader.touchSelection){positionSelectionBar(reader);return;}
   if(!selection){bar.hidden=true;state.selection=null;reader.selectionRange=null;return;}
-  state.selection=selection;
-  reader.selectionRange=window.getSelection().getRangeAt(0).cloneRange();
-  bar.hidden=false;
-  $('span',bar).textContent=selection.quote;
-  positionSelectionBar(reader);
+  showReaderSelection(reader,selection,window.getSelection().getRangeAt(0).cloneRange());
 }
 // Index existing entries once when the vocabulary changes. Prose stays as text,
 // including search marks: no per-word DOM nodes, network calls or model requests.
@@ -741,8 +857,7 @@ function installVocabHover(reader,article) {
         entry.root?el('p',{class:'hover-detail'},'词根 / 词源 · '+entry.root):null,
         entry.note?el('p',{class:'hover-detail'},'笔记 · '+entry.note):null,
         el('small',{},'本文生词表 · 完整内容可点「本段生词」'));
-      const viewport=window.visualViewport,left=viewport?.offsetLeft||0,top=viewport?.offsetTop||0;
-      const width=viewport?.width||innerWidth,height=viewport?.height||innerHeight,margin=10;
+      const {left,top,width,height}=readingViewport(),margin=10;
       tip.style.maxWidth=Math.max(0,width-2*margin)+'px';tip.style.maxHeight=Math.max(0,height-2*margin)+'px';
       tip.hidden=false;
       const size=tip.getBoundingClientRect();let y=rect.bottom+8;
@@ -761,16 +876,21 @@ function installVocabHover(reader,article) {
 }
 function positionSelectionBar(reader) {
   const bar=$('#selection-tools');if(!bar||bar.hidden||!reader.selectionRange||$('#sheet').open)return;
-  const viewport=window.visualViewport;
-  const left=viewport?.offsetLeft||0,top=viewport?.offsetTop||0;
-  const width=viewport?.width||innerWidth,height=viewport?.height||innerHeight,margin=10;
+  const {left,top,width,height}=readingViewport(),margin=10;
   const toolbarBottom=$('.reader-toolbar')?.getBoundingClientRect().bottom||top;
   const rects=[...reader.selectionRange.getClientRects()].filter(r=>r.width&&r.height&&r.bottom>Math.max(top,toolbarBottom)&&r.top<top+height);
-  if(!rects.length){bar.hidden=true;return;}
+  if(!rects.length){if(reader.touchSelection)clearReaderSelection(reader);else bar.hidden=true;return;}
   const selection=window.getSelection(),range=reader.selectionRange;
   const forward=selection?.anchorNode===range.startContainer&&selection?.anchorOffset===range.startOffset;
   const anchor=forward?rects.at(-1):rects[0];
   bar.style.maxWidth=Math.max(0,width-margin*2)+'px';
+  // Native selection handles and the OS copy/translate menu stay near the text.
+  // Keep our actions at the opposite edge while users adjust that selection.
+  if(matchMedia('(pointer:coarse)').matches&&!reader.touchSelection){
+    bar.classList.add('native-touch-selection');
+    bar.style.left=(left+margin)+'px';bar.style.top=(top+height-bar.getBoundingClientRect().height-margin)+'px';return;
+  }
+  bar.classList.remove('native-touch-selection');
   const size=bar.getBoundingClientRect();
   let y=anchor.bottom+9;
   if(y+size.height>top+height-margin)y=anchor.top-size.height-9;
@@ -806,19 +926,39 @@ async function readerPage(bookId,index,token,startParagraph=null) {
   highlightToggle.id='vocab-highlight-toggle';highlightToggle.hidden=!supportsVocabHighlights();
   highlightToggle.setAttribute('aria-pressed',String(reader.vocabHighlightEnabled));
   highlightToggle.title='用浅绿色背景标出本文词表中的生词和短语，可随时关闭；不额外生成词表。';
-  const tools=el('div',{class:'reader-toolbar'},el('a',{href:`#/book/${encodeURIComponent(data.parentBookId||bookId)}`},'← 目录'),vocabButton,
+  const pointToggle=button('切换为系统选文',()=>{},'touch-mode-toggle');pointToggle.id='touch-mode-toggle';
+  const more=button('更多',()=>{
+    const open=tools.classList.toggle('options-open');more.setAttribute('aria-expanded',String(open));
+  },'reader-more-toggle');more.id='reader-more-toggle';more.setAttribute('aria-expanded','false');more.setAttribute('aria-controls','reader-options');
+  const tools=el('div',{class:'reader-toolbar'},el('div',{class:'reader-primary'},
+    el('a',{href:`#/book/${encodeURIComponent(data.parentBookId||bookId)}`},'← 目录'),vocabButton,
+    button('与 AI 讨论',action(()=>discussionSheet(reader))),more),
+    el('div',{class:'reader-options',id:'reader-options'},
     button(data.state==='read'?'已读 ✓':'标记已读',action(async event=>{
       const target=event.target.closest('button');target.disabled=true;
       try{await api(`/books/${encodeURIComponent(bookId)}/state`,{method:'POST',data:{articleIndex:index,state:'read'}});
         reader.state='read';target.textContent='已读 ✓';toast('已计入全局已读统计');}finally{target.disabled=false;}
     })),
-    button('与 AI 讨论',action(()=>discussionSheet(reader))),button('查找',()=>{findRow.hidden=!findRow.hidden;if(!findRow.hidden)find.focus();}),highlightToggle,pauseTimer,
+    button('查找',()=>{findRow.hidden=!findRow.hidden;if(!findRow.hidden){tools.classList.remove('options-open');more.setAttribute('aria-expanded','false');find.focus();}}),highlightToggle,pauseTimer,pointToggle,
     el('span',{class:'grow'}),button('A−',()=>resizeReader(reader,-1)),button('A+',()=>resizeReader(reader,1)),
-    el('a',{href:`/api/books/${encodeURIComponent(bookId)}/file`,target:'_blank',rel:'noopener'},data.ext==='pdf'?'原版 PDF ↗':'下载 EPUB ↗'),progress);
+    el('a',{href:`/api/books/${encodeURIComponent(bookId)}/file`,target:'_blank',rel:'noopener'},data.ext==='pdf'?'原版 PDF ↗':'下载 EPUB ↗')),
+    progress);
+  tools.addEventListener('click',event=>{
+    const target=event.target.closest('#reader-options button,#reader-options a');
+    if(target&&!['A−','A+'].includes(target.textContent)){
+      tools.classList.remove('options-open');more.setAttribute('aria-expanded','false');
+    }
+  });
   const selection=el('div',{class:'selection-tools',id:'selection-tools',hidden:true,role:'toolbar','aria-label':'选中文字操作',
     onpointerdown:event=>event.preventDefault()},el('span',{}),
+    el('button',{type:'button',id:'selection-expand',hidden:true,onclick:()=>{
+      const chosen=sentenceSelection(reader,state.selection),text=reader.article.paragraphs[chosen.paragraph];
+      const start=[...text].slice(0,chosen.start).join('').length;
+      showReaderSelection(reader,chosen,vocabHoverRange($('#para-'+chosen.paragraph+' p'),start,start+chosen.quote.length),true);
+    }},'选整句'),
     button('查词并收藏',action(()=>lookupSelection(reader))),button('句子讲解',action(()=>analyzeSelection(reader))),
-    button('引用提问',action(()=>discussionSheet(reader,state.selection))),button('×',()=>{selection.hidden=true;reader.selectionRange=null;}));
+    button('引用提问',action(()=>discussionSheet(reader,state.selection))),
+    el('button',{type:'button','aria-label':'关闭选词操作',onclick:()=>clearReaderSelection(reader,true)},'×'));
   const body=el('div',{class:'reader-body',id:'reader-body'});
   body.style.setProperty('--reading-size',reader.fontSize+'px');
   data.article.paragraphs.forEach((text,i)=>{
@@ -826,11 +966,10 @@ async function readerPage(bookId,index,token,startParagraph=null) {
     const paragraph=el('section',{class:'paragraph',id:'para-'+i,'data-index':i},badge,el('p',{},text));
     paragraph.addEventListener('dblclick',action(async event=>{
       if(event.target.closest('button'))return;
+      if(reader.pointActive&&reader.touchSelection)return;
       let chosen=selectedQuote();
       if(chosen) {
-        const start=text.indexOf(chosen.quote);
-        const sentences=text.match(/[^.!?]+[.!?]+["'’”]?|[^.!?]+$/g)||[text];let cursor=0;
-        for(const sentence of sentences){if(start>=cursor&&start<cursor+sentence.length){chosen={quote:sentence.trim(),paragraph:i};break;}cursor+=sentence.length;}
+        chosen=sentenceSelection(reader,chosen);
       }else chosen={quote:text,paragraph:i};
       state.selection=chosen;await analyzeSelection(reader);
     }));body.append(paragraph);
@@ -841,9 +980,11 @@ async function readerPage(bookId,index,token,startParagraph=null) {
     el('div',{class:'reader-meta'},el('span',{},`${data.wordCount.toLocaleString()} 词`),el('span',{},`约 ${Math.max(1,Math.ceil(data.wordCount/220))} 分钟`),
       el('span',{},`${data.article.paragraphs.length} 段`)),
     data.sourceUrl?el('a',{class:'duplicate-source',href:data.sourceUrl,target:'_blank',rel:'noopener noreferrer'},'官方 Transcript ↗'):null,
-    data.summaryZh?el('details',{class:'reader-summary'},el('summary',{},data.excerpted?'整期摘要 · 全文分段摘录':'文章摘要'),el('p',{},data.summaryZh)):null),selection,body);
+    data.summaryZh?el('details',{class:'reader-summary'},el('summary',{},data.excerpted?'整期摘要 · 全文分段摘录':'文章摘要'),el('p',{},data.summaryZh)):null),
+    el('p',{class:'touch-reading-help',id:'touch-reading-help'}),selection,body);
   view.replaceChildren(article);window.scrollTo(0,0);
   installVocabHover(reader,article);
+  installTouchReading(reader,body,pointToggle);
   document.addEventListener('selectionchange',reader.selectionHandler=()=>{if(state.reader===reader)selectionBar(reader);});
   window.addEventListener('resize',reader.selectionResize=()=>positionSelectionBar(reader));
   window.visualViewport?.addEventListener('resize',reader.selectionResize);
@@ -872,6 +1013,7 @@ async function readerPage(bookId,index,token,startParagraph=null) {
 function resizeReader(reader,delta){reader.hoverHide?.();reader.fontSize=Math.max(16,Math.min(30,reader.fontSize+delta));$('#reader-body').style.setProperty('--reading-size',reader.fontSize+'px');localStorage.setItem('kandu-font',reader.fontSize);updateReaderProgress(reader);}
 function findArticle(reader,query) {
   reader.hoverHide?.();
+  clearReaderSelection(reader);
   let count=0;const needle=query.toLocaleLowerCase();
   reader.article.paragraphs.forEach((text,i)=>{
     const p=$('#para-'+i+' p');p.replaceChildren();
@@ -1228,6 +1370,8 @@ function editModel(initial) {
 }
 
 async function route() {
+  clearTimeout(toastTimer);$('#toast').hidden=true;
+  state.reader?.touchCleanup?.();
   state.reader?.hoverCleanup?.();
   clearTimeout(state.settingsTimer);
   if(!state.csrf){showLogin();return;}

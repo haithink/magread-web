@@ -6,6 +6,7 @@ from unittest.mock import patch
 from wsgiref.simple_server import make_server
 
 from playwright.sync_api import sync_playwright, expect
+from browser_helpers import reader_button
 from run_web_tests import WebTests, config, store, gen, core_dict, wordbook
 
 
@@ -107,7 +108,7 @@ def main():
                 page.evaluate("document.documentElement.style.scrollBehavior='auto'")
                 expect(toggle).to_have_attribute('aria-pressed','false')
                 assert highlights()==[]
-                toggle.click()
+                reader_button(page,'生词标记').click()
                 expect(toggle).to_have_attribute('aria-pressed','true')
                 assert 'paper over' in highlights()
                 tip = page.locator('#vocab-hover')
@@ -164,7 +165,7 @@ def main():
                 expect(tip).not_to_be_visible()
 
                 # Highlighting splits a word into several text nodes; still resolve the full word.
-                page.get_by_role('button', name='查找', exact=True).click()
+                reader_button(page,'查找').click()
                 page.get_by_label('查找原文').fill('and')
                 assert page.locator('#para-0 mark').count() > 0
                 assert page.evaluate("[...CSS.highlights.get('kandu-vocabulary')].every(r=>!r.startContainer.parentElement.closest('mark'))")
@@ -180,12 +181,12 @@ def main():
                 expect(page.locator('#selection-tools')).not_to_be_visible()
 
                 hover_word(page, 'candid')
-                page.locator('#reading-time-toggle').click()
+                reader_button(page,'暂停计时').click()
                 hover_word(page, 'candid')
                 expect(page.locator('#reader-reading-time')).to_contain_text('已暂停')
                 page.mouse.move(1, 1)
                 expect(page.locator('#reader-reading-time')).to_contain_text('已暂停')
-                page.locator('#reading-time-toggle').click()
+                reader_button(page,'继续计时').click()
 
                 page.get_by_label('查找原文').fill('')
                 assert 'candid' in highlights() and 'paper over' in highlights()
