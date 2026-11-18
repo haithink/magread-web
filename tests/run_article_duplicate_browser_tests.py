@@ -32,6 +32,9 @@ def main():
                 page.goto(base+'/#/book/new')
                 page.locator('#password').fill(WebTests.authcode); page.locator('#login-form button').click()
                 expect(page.locator('.article-card')).to_have_count(2)
+                # Optional publication provenance must leave no literal null text in the page.
+                assert page.locator('#app').evaluate('''node => [...node.childNodes]
+                    .filter(n=>n.nodeType===Node.TEXT_NODE).map(n=>n.textContent.trim()).filter(Boolean)''') == []
                 expect(page.locator('.article-card h2')).to_have_text(['A new story','Another new story'])
                 expect(page.locator('#issue-article-count')).to_have_text('共 3 篇 · 已隐藏 1 篇重复文章')
                 expect(page.get_by_role('button', name='全部 2', exact=True)).to_be_visible()
