@@ -92,6 +92,11 @@ def record(meta, art, data):
     source_id = reading_stats.web_id(meta['id'], art['index'])
     key = reading_stats.title_key(art['title'])
     now = time.time_ns() // 1_000_000
+    sampled = data.get('sampledAt')
+    if sampled is not None:
+        if type(sampled) is not int or not now-7*86_400_000 <= sampled <= now+30_000:
+            raise ValueError('计时采样时间无效或已超过七天')
+        now = min(sampled, now)
     with connection() as db:
         db.execute('BEGIN IMMEDIATE')
         previous = db.execute('SELECT * FROM sessions WHERE id=?', (session_id,)).fetchone()
@@ -108,6 +113,8 @@ def record(meta, art, data):
             return _record_result(db,source_id)
         if elapsed < previous['elapsed_ms']:
             raise ValueError('阅读计时累计值不能回退')
+        if now < previous['last_seen']:
+            raise ValueError('阅读计时采样时间不能回退')
         credit = db.execute('SELECT credited_until FROM clock WHERE id=1').fetchone()
         active = max(0, min(elapsed - previous['elapsed_ms'], now - previous['last_seen'],
             MAX_INTERVAL_MS, now - credit['credited_until'] if credit else MAX_INTERVAL_MS))

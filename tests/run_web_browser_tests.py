@@ -98,6 +98,9 @@ def check_model_editor(page, new_name, replace_key=False):
 
 def check_recent_reading(page, collapsed_count, touch=False):
     page.get_by_role('link', name='书库', exact=True).click()
+    # This fixture modifies the server directly from another client. Explicitly
+    # request its new snapshot rather than assert against the immediate cache.
+    page.evaluate('route({refresh:true})')
     cards = page.locator('.recent-card:visible')
     more = page.get_by_role('button', name='更多 →', exact=True)
     expect(cards).to_have_count(collapsed_count)

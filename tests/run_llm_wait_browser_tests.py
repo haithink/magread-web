@@ -37,6 +37,9 @@ def reading_point(page,paragraph=8,at_bottom=False):
 
 
 def analyze(page,paragraph=8,at_bottom=False):
+    # This suite explicitly exercises a new network wait each time. Browser
+    # explanation reuse has its own cache regression coverage.
+    page.evaluate("() => ReadingCache.remove(key=>key.startsWith('analysis:'))")
     point=reading_point(page,paragraph,at_bottom)
     page.mouse.dblclick(point['x'],point['y'])
     expect(page.locator('#sheet-wait')).to_be_visible()
@@ -154,6 +157,7 @@ def main():
                 expect(page.locator('#sheet')).to_be_visible();expect(wait).to_have_count(0)
                 expect(page.locator('#sheet-title')).to_contain_text('第 9 段');page.locator('#sheet-close').click()
                 # Word meaning and discussion use the same nonblocking lifecycle.
+                page.evaluate("() => ReadingCache.remove(key=>key.startsWith('analysis:'))")
                 point=reading_point(page,8);page.mouse.dblclick(point['x'],point['y'])
                 # This double-click launches sentence analysis; dismiss it and select via the toolbar.
                 page.get_by_role('button',name='关闭等待提示').click()

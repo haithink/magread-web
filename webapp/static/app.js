@@ -14,6 +14,7 @@ const el = (tag, attrs = {}, ...children) => {
 const button = (text, callback, cls = '') => el('button', {type:'button', class:cls, onclick:callback}, text);
 const state = {csrf:'', route:0, reader:null, selection:null, activeJobs:new Map(), jobObservers:new Map(), vocabWaits:new Map(), sheet:0, sheetWait:null};
 const view = $('#app');
+const readingId=()=>Array.from(crypto.getRandomValues(new Uint8Array(16)),v=>v.toString(16).padStart(2,'0')).join('');
 function syncVisualViewport() {
   const viewport=window.visualViewport;
   document.documentElement.style.setProperty('--visual-height',(viewport?.height||innerHeight)+'px');
@@ -42,22 +43,149 @@ function toast(text) {
   $('#toast').textContent = text; $('#toast').hidden = false;
   clearTimeout(toastTimer); toastTimer = setTimeout(() => $('#toast').hidden = true, 4500);
 }
-async function api(path, {method = 'GET', data, form, keepalive = false, uploadSize} = {}) {
+async function networkApi(path, {method = 'GET', data, form, keepalive = false, uploadSize, etag='', metadata=false} = {}) {
   const headers = {};
+  if(etag)headers['If-None-Match']=etag;
   if(uploadSize!==undefined)headers['X-Upload-Size']=String(uploadSize);
   if (method !== 'GET') headers['X-CSRF-Token'] = state.csrf;
   if (data !== undefined) headers['Content-Type'] = 'application/json';
-  const response = await fetch('/api' + path, {method, headers, credentials:'same-origin',
-    body:form || (data !== undefined ? JSON.stringify(data) : undefined), keepalive});
-  const result = await response.json();
+  const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),20_000);
+  let response,result;
+  try{
+    response = await fetch('/api' + path, {method, headers, credentials:'same-origin',signal:controller.signal,
+      body:form || (data !== undefined ? JSON.stringify(data) : undefined), keepalive});
+    if(response.status===304)return {unchanged:true};
+    result = await response.json();
+  }finally{clearTimeout(timer);}
   if (!response.ok) {
-    if (response.status === 401 && path !== '/login') showLogin();
+    if (response.status === 401 && path !== '/login') {state.csrf='';cacheEpoch++;cacheRequests.clear();localReading.clear();ReadingSync.reset();ReadingCache.clear();showLogin();}
     const error=new Error(result.error || '请求未完成');error.code=result.code;error.status=response.status;
     if(error.code==='config_locked'&&location.hash==='#/settings')queueMicrotask(route);
     throw error;
   }
-  return result;
+  return metadata?{value:result,etag:response.headers.get('ETag')||''}:result;
 }
+const cacheRequests=new Map();let cacheEpoch=0;
+const cacheable=path=>/^\/(library|reading-stats)(\?|$)/.test(path)||/^\/books\/[^/]+(?:\/articles\/\d+(?:\/vocab)?)?$/.test(path);
+const articleGroup=path=>path.match(/^\/books\/[^/]+\/articles\/\d+/)?.[0]||'';
+function cacheComparable(path,value){
+  if(articleGroup(path)===path){const {history,readingTiming,state,...content}=value;return JSON.stringify(content);}
+  return JSON.stringify(value);
+}
+function cacheNotice(message,refresh=true){
+  if(!state.csrf)return;let notice=$('#reading-cache-notice');
+  if(!notice){notice=el('div',{id:'reading-cache-notice',class:'reading-cache-notice',role:'status'});view.prepend(notice);}
+  notice.replaceChildren(el('span',{},message),...(refresh?[button('刷新',()=>route({refresh:true}))]:[]));
+}
+async function cachedRead(path,{fresh=false,onUpdate}={}){
+  fresh=fresh||state.forceReadingRefresh;
+  const record=await ReadingCache.get(path),token=state.route,epoch=cacheEpoch;
+  const refresh=()=>{
+    if(!cacheRequests.has(path)){
+      const pending=networkApi(path,{etag:record?.etag,metadata:true}).then(async response=>{
+        const value=response.unchanged?record?.value:response.value;if(!value)return null;
+        if(epoch!==cacheEpoch||!state.csrf)return value;
+        await ReadingCache.put(path,value,{etag:response.etag||record?.etag,group:articleGroup(path)});
+        if(record&&token===state.route&&cacheComparable(path,record.value)!==cacheComparable(path,value)){
+          if(onUpdate)onUpdate(value);else cacheNotice('服务器有更新，刷新后查看；当前阅读位置保持不变。');
+        }
+        return value;
+      }).finally(()=>{if(cacheRequests.get(path)===pending)cacheRequests.delete(path);});
+      cacheRequests.set(path,pending);
+    }
+    return cacheRequests.get(path);
+  };
+  if(record&&!fresh){
+    if(navigator.onLine!==false&&(!path.endsWith('/vocab')||Date.now()-record.checked>30_000))refresh().catch(()=>{if(token===state.route)cacheNotice('正在使用本机缓存，网络恢复后会更新。',false);});
+    else if(navigator.onLine===false)cacheNotice('正在使用本机缓存，网络恢复后会更新。',false);
+    return record.value;
+  }
+  return refresh();
+}
+async function staleReadingCache(){
+  cacheEpoch++;cacheRequests.clear();
+  await ReadingCache.stale();
+}
+async function api(path,options={}){
+  if((options.method||'GET')==='GET'&&cacheable(path))return cachedRead(path,options);
+  const value=await networkApi(path,options);
+  if(options.method&&options.method!=='GET'&&(path==='/settings'||path==='/preferences')){
+    state.modelRevision=String(Date.now());await ReadingCache.remove(key=>key.startsWith('analysis:')||key.startsWith('meaning:'));
+  }
+  if(options.method&&options.method!=='GET'&&!['/login','/logout'].includes(path)&&!path.startsWith('/settings/')){
+    if(path==='/wordbook'||path.startsWith('/wordbook/'))await ReadingCache.remove(key=>key.startsWith('meaning:'));
+    await staleReadingCache();
+  }
+  return value;
+}
+
+// Only reading positions and cumulative clock samples are queued. No tokens or
+// general POST bodies are persisted. Journal writes are synchronous on pagehide.
+const ReadingSync=(()=>{
+  let items=[],journal='',prefix='',running=null,offset=0,enabled=false,epoch=0;
+  const now=()=>Math.round(Date.now()+offset);
+  function persist(){try{
+    const own=items.filter(item=>item.journal===journal);
+    if(own.length)localStorage.setItem(journal,JSON.stringify(own));else localStorage.removeItem(journal);
+    return true;
+  }catch{return false;}}
+  function acknowledge(item){try{
+    const remaining=JSON.parse(localStorage.getItem(item.journal)||'[]').filter(old=>old.id!==item.id);
+    if(remaining.length)localStorage.setItem(item.journal,JSON.stringify(remaining));else localStorage.removeItem(item.journal);
+  }catch{}}
+  function init(identity){
+    epoch++;enabled=true;offset=(identity.serverTime||Date.now())-Date.now();
+    prefix='kandu-reading-outbox:'+identity.cacheScope+':';journal=prefix+readingId();items=[];
+    try{for(const key of Object.keys(localStorage))if(key.startsWith(prefix)){
+      const pending=JSON.parse(localStorage.getItem(key)||'[]').filter(item=>
+        /^\/books\/[^/]+\/articles\/\d+\/(progress|reading-time)$/.test(item.path));
+      items.push(...pending.map(item=>({...item,journal:key})));
+    }}catch{}
+    items.sort((a,b)=>a.at-b.at);
+  }
+  function reset(){epoch++;enabled=false;items=[];if(prefix)try{
+    for(const key of Object.keys(localStorage))if(key.startsWith(prefix))localStorage.removeItem(key);
+  }catch{}journal='';}
+  function add(path,data){
+    if(!enabled)return null;
+    const item={id:readingId(),path,data,at:now(),journal};
+    if(path.endsWith('/progress'))items=items.filter(old=>old.path!==path||old.journal!==journal);
+    items.push(item);
+    if(!persist())cacheNotice('浏览器存储已满，阅读记录暂存在本页，请保持页面打开以完成同步。',false);
+    return item;
+  }
+  async function drain(){
+    if(!enabled||!state.csrf||!items.length||navigator.onLine===false)return;
+    if(running)return running;
+    const owner=epoch;
+    running=(async()=>{
+      while(enabled&&owner===epoch&&items.length&&state.csrf){
+        const item=items[0];let result;
+        try{result=await networkApi(item.path,{method:'POST',data:item.data,keepalive:true});}
+        catch(error){
+          if(error.status===400||error.status===404){items=items.filter(i=>i.id!==item.id);acknowledge(item);persist();cacheNotice('有阅读记录因内容变化或超过七天未能同步，请检查最近阅读位置。',false);continue;}
+          throw error;
+        }
+        if(owner!==epoch)return;
+        items=items.filter(i=>i.id!==item.id);acknowledge(item);persist();
+        window.dispatchEvent(new CustomEvent('reading-synced',{detail:{...item,result}}));
+      }
+    })().finally(()=>{running=null;});
+    return running;
+  }
+  return {init,reset,add,drain,now,pending:()=>items.length,entries:()=>structuredClone(items)};
+})();
+async function initReadingStorage(identity){
+  state.cacheIdentity=(state.cacheIdentity||0)+1;
+  cacheEpoch++;cacheRequests.clear();
+  state.modelRevision=identity.modelRevision||'';
+  await ReadingCache.init(identity.cacheScope||'reading');ReadingSync.init(identity);
+  ReadingSync.drain().catch(()=>{});
+}
+const cacheAuth=typeof BroadcastChannel==='function'?new BroadcastChannel('kandu-reading-auth'):null;
+cacheAuth?.addEventListener('message',event=>{if(event.data==='logout'&&state.csrf){state.csrf='';cacheEpoch++;cacheRequests.clear();localReading.clear();ReadingSync.reset();ReadingCache.clear();showLogin();}});
+window.addEventListener('online',()=>{ReadingSync.drain().catch(()=>{});if(state.reader)loadVocab(state.reader,{fresh:true}).catch(()=>{});});
+setInterval(()=>{if(state.csrf)ReadingSync.drain().catch(()=>{});},15_000);
 function action(callback) { return (...args) => { if(args[0]?.type==='submit')args[0].preventDefault();return Promise.resolve().then(() => callback(...args)).catch(error => toast(error.message)); }; }
 function empty(title, text='') { return el('div', {class:'empty'}, el('h2', {}, title), el('p', {}, text)); }
 function heading(kicker, title, subtitle, actions=[]) {
@@ -171,12 +299,19 @@ $('#sheet').addEventListener('cancel',event=>{event.preventDefault();closeSheet(
 $('#sheet').addEventListener('click', event => { if (event.target === $('#sheet')) { const r=$('#sheet').getBoundingClientRect(); if(event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom) closeSheet(); } });
 $('#sheet').addEventListener('close', () => { if(sheetCloseEvents){sheetCloseEvents--;return;}state.sheet++;clearSheetWait(); });
 document.addEventListener('keydown',event=>{if(event.key==='Escape'&&state.sheetWait&&!$('#sheet').open){event.preventDefault();closeSheet();}});
-$('#logout').onclick = action(async () => { if(state.reader){state.reader.hoverCleanup?.();await stopReadingClock(state.reader);}await api('/logout', {method:'POST', data:{}}); state.csrf=''; state.reader=null; showLogin(); });
+$('#logout').onclick = action(async () => {
+  if(state.reader){state.reader.hoverCleanup?.();saveProgress(true);stopReadingClock(state.reader);}
+  if(ReadingSync.pending())await ReadingSync.drain();
+  await api('/logout', {method:'POST', data:{}});state.csrf='';cacheEpoch++;cacheRequests.clear();cacheAuth?.postMessage('logout');ReadingSync.reset();localReading.clear();await ReadingCache.clear();state.reader=null;showLogin();
+});
 
 function showLogin() {
+  state.cacheIdentity=(state.cacheIdentity||0)+1;
+  state.route++;
   state.reader?.hoverCleanup?.();
   state.reader?.touchCleanup?.();
   if(state.reader)stopReadingClock(state.reader,false);
+  state.reader=null;
   $('#navigation').hidden = true;
   closeSheet();
   view.replaceChildren($('#login-template').content.cloneNode(true));
@@ -184,7 +319,7 @@ function showLogin() {
     event.preventDefault(); const submit=$('button', event.target); submit.disabled=true;
     try {
       const response=await api('/login', {method:'POST', data:{password:$('#password').value}});
-      state.csrf=response.csrf; await route();
+      state.csrf=response.csrf;await initReadingStorage(response); await route();
     } catch(error) { $('#login-error').textContent=error.message; }
     finally { submit.disabled=false; }
   };
@@ -236,6 +371,15 @@ function watchJob(jobId,onDone,onUpdate,onSettled,onFailure) {
 
 async function library(token) {
   const [data,stats]=await Promise.all([api('/library'),api('/reading-stats')]); if(token!==state.route)return;
+  for(const [path,history] of localReading){
+    const match=path.match(/^\/books\/([^/]+)\/articles\/(\d+)$/);if(!match)continue;
+    const bookId=decodeURIComponent(match[1]),articleIndex=Number(match[2]);
+    const previous=data.recent.find(r=>r.bookId===bookId&&r.articleIndex===articleIndex);
+    if(!previous||history.lastReadAt>=previous.lastReadAt){
+      data.recent=data.recent.filter(r=>r!==previous);data.recent.push({...history,bookId,articleIndex});
+    }
+  }
+  data.recent.sort((a,b)=>b.lastReadAt-a.lastReadAt);data.recent=data.recent.slice(0,80);
   const content=el('div');
   content.append(heading('A WINDOW TO THE WORLD','我的阅读室',`${data.books.length} 本刊物 · 阅读结果集中保存，各设备接续阅读`,[
     button('刊物来源',action(podcastSheet)),
@@ -397,6 +541,10 @@ function issueRecentReading(articles,articleLink,isSeries) {
 }
 async function digestPage(bookId,token) {
   const data=await api('/books/'+encodeURIComponent(bookId));if(token!==state.route)return;
+  for(const article of data.articles){
+    const history=localReading.get(`/books/${encodeURIComponent(article.bookId||bookId)}/articles/${article.articleIndex??article.index}`);
+    if(history&&history.lastReadAt>=(article.history?.lastReadAt||0)){article.history=history;if(history.atEnd)article.state='read';}
+  }
   const isSeries=data.sourceType==='podcast-series';
   const articleLink=a=>linkFor(a.bookId||bookId,a.articleIndex??a.index);
   const recent=issueRecentReading(data.articles,articleLink,isSeries);
@@ -513,11 +661,36 @@ function saveProgress(keepalive=false,reader=state.reader) {
   const position=currentPosition(reader);if(!position)return Promise.resolve();
   const key=JSON.stringify(position);if(reader.lastPosition===key)return Promise.resolve();
   reader.lastPosition=key;
-  progressStatus(reader,'正在保存…');
-  return api(baseFor(reader)+'/progress',{method:'POST',data:position,keepalive}).then(()=>{
-    if(key===JSON.stringify(currentPosition(reader)))progressStatus(reader,'已同步');
-  }).catch(()=>{reader.lastPosition=null;progressStatus(reader,'待同步');if(!keepalive)toast('阅读进度暂未保存，网络恢复后会重试');});
+  const path=baseFor(reader),observedAt=ReadingSync.now();
+  const progress=((reader.paragraphOffsets[position.paragraphIndex]||0)+position.paragraphOffset)/Math.max(1,reader.totalCharacters);
+  const record={...position,title:reader.article.title,titleZh:reader.titleZh,bookTitle:reader.bookTitle,lastReadAt:observedAt,
+    paragraphCount:reader.article.paragraphs.length,wordCount:reader.wordCount,contentVersion:reader.contentVersion,progress,atStart:progress===0,atEnd:progress>=.995};
+  reader.history=record;localReading.set(path,record);
+  updateCachedHistory(path,record);
+  ReadingSync.add(path+'/progress',{...position,observedAt,contentVersion:reader.contentVersion});
+  progressStatus(reader,'本机已保存 · 待同步');
+  return ReadingSync.drain().catch(()=>{progressStatus(reader,'本机已保存 · 待同步');});
 }
+const localReading=new Map();
+async function updateCachedHistory(path,history){
+  const record=await ReadingCache.get(path);
+  if(record)await ReadingCache.put(path,{...record.value,history},{...record,checked:0});
+}
+window.addEventListener('reading-synced',event=>{
+  const {path,data,result}=event.detail,reader=state.reader;
+  if(path.endsWith('/progress')){
+    const base=path.slice(0,-'/progress'.length),local=localReading.get(base);
+    if(!local||result.record.lastReadAt>=local.lastReadAt){const history={...local,...result.record};localReading.set(base,history);updateCachedHistory(base,history);}
+    if(reader&&baseFor(reader)===base&&reader.lastPosition===JSON.stringify({paragraphIndex:data.paragraphIndex,paragraphOffset:data.paragraphOffset})){
+      progressStatus(reader,result.accepted===false?'服务器有较新的阅读位置':'已同步');
+    }
+    ReadingCache.stale(key=>cacheable(key)&&!key.endsWith('/vocab'));
+  }else if(reader&&path===baseFor(reader)+'/reading-time'&&reader.clock?.id===data.sessionId){
+    reader.clock.serverMs=result.totalActiveMs;reader.clock.syncedElapsed=Math.max(reader.clock.syncedElapsed,data.elapsedMs);
+    reader.clock.lastSaved=JSON.stringify([data.elapsedMs,{paragraphIndex:data.paragraphIndex,paragraphOffset:data.paragraphOffset}]);
+    reader.clock.syncFailed=false;readingClockTick(reader);
+  }
+});
 
 function readingDuration(ms) {
   const seconds=Math.floor(ms/1000),minutes=Math.floor(seconds/60);
@@ -561,19 +734,19 @@ function readingClockTick(reader=state.reader) {
 function flushReadingClock(reader=state.reader,keepalive=false,initialPosition=null) {
   if(!reader?.clock)return Promise.resolve();
   const clock=reader.clock;
-  if(clock.sending)return clock.sending.then(()=>flushReadingClock(reader,keepalive,initialPosition));
   const position=initialPosition||currentPosition(reader);if(!position)return Promise.resolve();
   const elapsedMs=Math.floor(clock.elapsedMs),signature=JSON.stringify([elapsedMs,position]);
-  if(signature===clock.lastSaved)return Promise.resolve();
-  const data={...position,sessionId:clock.id,sequence:clock.sequence++,elapsedMs};
-  clock.sending=api(baseFor(reader)+'/reading-time',{method:'POST',data,keepalive}).then(result=>{
-    clock.serverMs=result.totalActiveMs;clock.syncedElapsed=data.elapsedMs;clock.lastSaved=signature;clock.syncFailed=false;
-  }).catch(()=>{clock.syncFailed=true;}).finally(()=>{clock.sending=null;});
+  if(signature===clock.lastQueued)return clock.sending||Promise.resolve();
+  clock.lastQueued=signature;
+  const data={...position,sessionId:clock.id,sequence:clock.sequence++,elapsedMs,sampledAt:ReadingSync.now(),contentVersion:reader.contentVersion};
+  ReadingSync.add(baseFor(reader)+'/reading-time',data);
+  const pending=ReadingSync.drain().catch(()=>{clock.syncFailed=true;}).finally(()=>{if(clock.sending===pending)clock.sending=null;});
+  clock.sending=pending;
   return clock.sending;
 }
 function startReadingClock(reader,initialPosition) {
   const now=performance.now();
-  reader.clock={id:Array.from(crypto.getRandomValues(new Uint8Array(16)),v=>v.toString(16).padStart(2,'0')).join(''),
+  reader.clock={id:readingId(),
     sequence:0,elapsedMs:0,syncedElapsed:0,serverMs:reader.readingTiming?.activeMs||0,
     lastSample:now,lastInteraction:now,manualPaused:false,stopped:false};
   const clock=reader.clock;
@@ -899,6 +1072,11 @@ function positionSelectionBar(reader) {
 }
 async function readerPage(bookId,index,token,startParagraph=null) {
   const data=await api(`/books/${encodeURIComponent(bookId)}/articles/${index}`);if(token!==state.route)return;
+  const path=`/books/${encodeURIComponent(bookId)}/articles/${index}`;
+  const queued=ReadingSync.entries().filter(item=>item.path===path+'/progress').at(-1);
+  const local=localReading.get(path);
+  if(local&&(!local.contentVersion||local.contentVersion===data.contentVersion)&&local.lastReadAt>=(data.history?.lastReadAt||0))data.history=local;
+  if(queued&&(!queued.data.contentVersion||queued.data.contentVersion===data.contentVersion)&&queued.data.observedAt>=(data.history?.lastReadAt||0))data.history={...queued.data,lastReadAt:queued.data.observedAt,atStart:queued.data.paragraphIndex===0&&queued.data.paragraphOffset===0};
   const reader={...data,bookId,index,ready:false,vocab:null,fontSize:Number(localStorage.getItem('kandu-font')||21),
     vocabHighlightEnabled:localStorage.getItem('kandu-vocab-highlight')!=='off'};state.reader=reader;
   reader.paragraphOffsets=[];reader.totalCharacters=0;
@@ -1010,7 +1188,7 @@ async function readerPage(bookId,index,token,startParagraph=null) {
   };
   window.addEventListener('scroll',readerScroll,{passive:true});
   // Record this article in recent reading even if the user stays at its beginning.
-  await saveProgress();
+  saveProgress();
   await loadVocab(reader);
 }
 function resizeReader(reader,delta){reader.hoverHide?.();reader.fontSize=Math.max(16,Math.min(30,reader.fontSize+delta));$('#reader-body').style.setProperty('--reading-size',reader.fontSize+'px');localStorage.setItem('kandu-font',reader.fontSize);updateReaderProgress(reader);}
@@ -1027,8 +1205,13 @@ function findArticle(reader,query) {
   });$('#find-count').textContent=query?`${count} 处匹配`:'';
   updateVocabHighlights(reader);
 }
-async function loadVocab(reader) {
-  const response=await api(baseFor(reader)+'/vocab');if(state.reader!==reader)return;
+async function loadVocab(reader,{fresh=false}={}) {
+  const response=await api(baseFor(reader)+'/vocab',{fresh,onUpdate:value=>applyVocab(reader,value)});
+  applyVocab(reader,response);
+}
+function applyVocab(reader,response){
+  if(state.reader!==reader)return;
+  if(response.contentVersion&&reader.contentVersion&&response.contentVersion!==reader.contentVersion){cacheNotice('文章正文已更新，刷新后查看新版正文与词表。');return;}
   reader.vocab=response;
   indexVocabHover(reader);
   updateVocabHighlights(reader);
@@ -1089,7 +1272,7 @@ async function generateReaderVocab(reader,paragraph,request={}) {
       if(state.reader!==reader)return;
       if(job.state!=='done'){failure(job.error||'生成已停止，可再次补缺');return;}
       try {
-        await loadVocab(reader);
+        await loadVocab(reader,{fresh:true});
         if(sheet===state.sheet&&state.reader===reader)await vocabSheet(reader,paragraph);
       }catch(error){failure('生词已生成，加载词表失败：'+error.message);}
     },job=>updateSheetWait(sheet,job.status),()=>failure('连接中断，服务器任务仍会保存结果。可稍后重新打开生词表。'));
@@ -1109,20 +1292,23 @@ async function vocabSheet(reader,paragraph) {
     const groups=[...(paragraph===null?[{index:-1,entries:data.vocab.titleEntries}]:[]),...data.vocab.paragraphs.filter(p=>paragraph===null||p.index===paragraph)];
     for(const group of groups){const entries=group.entries.filter(e=>e.word.toLowerCase().includes(search.value.toLowerCase()));if(!entries.length)continue;
       list.append(el('div',{class:'vocab-section'},group.index===-1?'标题生词':`第 ${group.index+1} 段 · ${entries.length} 项`));
-      for(const entry of entries){list.append(entryNode(entry,()=>loadVocab(reader),{bookId:reader.bookId,index:reader.index,paragraph:group.index}));total++;}
+      for(const entry of entries){list.append(entryNode(entry,()=>loadVocab(reader,{fresh:true}),{bookId:reader.bookId,index:reader.index,paragraph:group.index}));total++;}
     }
     if(paragraph===null&&data.vocab.idioms?.length){list.append(el('div',{class:'vocab-section'},'熟词僻义'));for(const idiom of data.vocab.idioms)if(idiom.word.toLowerCase().includes(search.value.toLowerCase())){list.append(entryNode({...idiom,sense:idiom.inText,root:'常见义 · '+idiom.common},null,{bookId:reader.bookId,index:reader.index,paragraph:null}));total++;}}
     if(!total)list.append(empty('当前没有可显示的词条',missing?'点击上方按钮生成词表。':'可以补充短语解释，或选中原文查词。'));
   }search.oninput=render;render();showSheet(paragraph===null?'本篇生词与短语':`第 ${paragraph+1} 段 · 生词与短语`,body);
 }
 async function lookupSelection(reader) {
+  const cacheOwner=state.cacheIdentity;
   const chosen={...state.selection};if(!chosen.quote)return;
   const output=el('div',{},el('p',{class:'muted'},'正在查词…'));
   const sheet=showSheet('查词 · 本文含义',output,{reader,paragraph:chosen.paragraph,status:'正在查词…'});
   $('#selection-tools').hidden=true;
   const request={word:chosen.quote,paragraph:chosen.paragraph,start:chosen.start};
+  const cacheKey='meaning:'+JSON.stringify([baseFor(reader),reader.contentVersion,state.modelRevision,request]);
+  const saved=await ReadingCache.get(cacheKey);
   let response;
-  try{response=await api(baseFor(reader)+'/lookup',{method:'POST',data:request});}
+  try{response=saved?.value||await api(baseFor(reader)+'/lookup',{method:'POST',data:request});}
   catch(error){if(sheet===state.sheet){output.replaceChildren(el('p',{class:'error'},error.message));finishSheetWait(sheet);}return;}
   if(sheet!==state.sheet)return;
   const context=el('section',{class:'lookup-context','aria-live':'polite'});
@@ -1130,12 +1316,13 @@ async function lookupSelection(reader) {
     entryNode({...response.saved,inWordbook:true,senseSource:'wordbook'}));
   output.replaceChildren(el('div',{class:'lookup-word'},el('strong',{},chosen.quote),el('span',{class:'phonetic'},response.saved.phonetic||'')),
     context,details,sourceNode({...response.saved.source,contextMeaning:null}));
-  const refreshVocab=()=>{if(state.reader===reader)return loadVocab(reader);};
+  const refreshVocab=()=>{if(state.reader===reader)return loadVocab(reader,{fresh:true});};
   const explain=async()=>{
     context.replaceChildren(el('p',{class:'muted'},'AI 正在结合当前句子与段落解释…'));
     waitForSheet(sheet,reader,chosen.paragraph,'AI 正在结合本文解释词义…');
     try {
       await runJob(baseFor(reader)+'/lookup-context',{...request,savedWord:response.saved.word},async job=>{
+        if(job.state==='done'&&state.csrf&&cacheOwner===state.cacheIdentity)await ReadingCache.put(cacheKey,{...response,contextMeaning:job.result.meaning},{group:baseFor(reader)});
         if(sheet!==state.sheet)return;
         if(job.state==='done'){context.replaceChildren(contextMeaningNode(job.result.meaning));finishSheetWait(sheet);await refreshVocab();}
         else showFailure(job.error||'本文解释未完成');
@@ -1146,7 +1333,17 @@ async function lookupSelection(reader) {
   if(response.contextMeaning){context.append(contextMeaningNode(response.contextMeaning));finishSheetWait(sheet);}
   else if(response.canExplain)await explain();
   else {details.open=true;context.append(el('p',{class:'muted'},'配置 LLM 后，可结合本文语境解释词义。'),el('a',{href:'#/settings'},'前往设置 →'));finishSheetWait(sheet);}
-  await refreshVocab();
+  if(!saved){if(response.contextMeaning&&state.csrf&&cacheOwner===state.cacheIdentity)await ReadingCache.put(cacheKey,response,{group:baseFor(reader)});await refreshVocab();}
+  else{
+    // Showing a cached explanation is instant; collection/source updates still
+    // happen on the server and are never falsely reported as a new offline save.
+    $('summary',details).textContent='词典 / 个人释义 · 已有收藏，正在核对';
+    api(baseFor(reader)+'/lookup',{method:'POST',data:request}).then(async value=>{
+      if(state.csrf&&cacheOwner===state.cacheIdentity)await ReadingCache.put(cacheKey,value,{group:baseFor(reader)});
+      if(sheet===state.sheet)$('summary',details).textContent='词典 / 个人释义 · 已加入个人生词本';
+      await refreshVocab();
+    }).catch(()=>{if(sheet===state.sheet)$('summary',details).textContent='本机缓存 · 收藏与来源暂未更新';});
+  }
 }
 function contextMeaningNode(meaning,compact=false) {
   return el('section',{class:'context-meaning'+(compact?' compact':'')},
@@ -1156,12 +1353,18 @@ function contextMeaningNode(meaning,compact=false) {
     !compact&&meaning.translation?el('p',{class:'context-translation'},meaning.translation):null);
 }
 async function analyzeSelection(reader) {
+  const cacheOwner=state.cacheIdentity;
   const chosen={...state.selection};if(!chosen.quote)return;
   const output=el('div',{},el('p',{class:'quote'},chosen.quote),el('p',{class:'muted'},'正在准备句子讲解…'));
   const sheet=showSheet('句子讲解',output,{reader,paragraph:chosen.paragraph,status:'正在准备句子讲解…'});
+  const cacheKey='analysis:'+JSON.stringify([baseFor(reader),reader.contentVersion,state.modelRevision,chosen.quote]);
+  const cached=await ReadingCache.get(cacheKey);
+  if(sheet!==state.sheet)return;
+  if(cached){renderAnalysis(output,cached.value,chosen.quote,{bookId:reader.bookId,index:reader.index,paragraph:chosen.paragraph});finishSheetWait(sheet);return;}
   const failure=message=>{if(sheet!==state.sheet)return;output.replaceChildren(el('p',{class:'quote'},chosen.quote),el('p',{class:'error'},message));finishSheetWait(sheet);};
   try {
-    await runJob(baseFor(reader)+'/analyze',{sentence:chosen.quote,paragraph:chosen.paragraph},job=>{
+    await runJob(baseFor(reader)+'/analyze',{sentence:chosen.quote,paragraph:chosen.paragraph},async job=>{
+      if(job.state==='done'&&state.csrf&&cacheOwner===state.cacheIdentity)await ReadingCache.put(cacheKey,job.result,{group:baseFor(reader)});
       if(sheet!==state.sheet)return;
       if(job.state!=='done'){failure(job.error||'未能完成讲解');return;}
       renderAnalysis(output,job.result,chosen.quote,{bookId:reader.bookId,index:reader.index,paragraph:chosen.paragraph});
@@ -1249,7 +1452,7 @@ async function editWord(word='') {
   form.append(el('button',{type:'submit',class:'primary'},'保存词条'));
   form.onsubmit=action(async event=>{event.preventDefault();const data=Object.fromEntries(Object.entries(fields).map(([k,v])=>[k,v.value]));
     if(word)data.original=word;await api('/wordbook',{method:'POST',data});closeSheet();toast('词条已保存');
-    if(state.reader)await loadVocab(state.reader);else if(location.hash==='#/wordbook')route();});
+    if(state.reader)await loadVocab(state.reader,{fresh:true});else if(location.hash==='#/wordbook')route();});
   showSheet(word?'编辑个人词条':'添加个人词条',form);
 }
 
@@ -1259,7 +1462,7 @@ async function settingsPage(token) {
   level.onchange=action(async()=>{await api('/preferences',{method:'POST',data:{vocabLevel:level.value}});toast('词汇水平已保存');});
   const modelPanels=el('div',{class:'settings-grid config-panels'});
   view.replaceChildren(heading('MAKE IT YOURS','阅读设置','模型配置由独立密码保护，各设备共用阅读偏好'),
-    el('section',{class:'panel'},el('h2',{},'阅读偏好'),el('label',{},'默认已掌握的词汇',level)),modelPanels,syncSettingsPanel(sync));
+    el('section',{class:'panel'},el('h2',{},'阅读偏好'),el('label',{},'默认已掌握的词汇',level)),modelPanels,readingCachePanel(),syncSettingsPanel(sync));
   if(!access.unlocked){
     const password=el('input',{type:'password',required:true,maxlength:200,autocomplete:'current-password','aria-label':'模型配置独立密码'});
     const error=el('p',{class:'error',role:'alert',hidden:true});
@@ -1290,6 +1493,21 @@ async function settingsPage(token) {
     el('p',{class:'muted'},'已临时解锁，到期后自动锁定。'),
     button('立即锁定模型配置',action(async()=>{await api('/settings/lock',{method:'POST',data:{}});route();})),models),
     el('section',{class:'panel'},el('h2',{},'导入模型配置'),form));
+}
+
+function readingCachePanel(){
+  const details=el('p',{class:'muted'},'正在检查本机缓存…');
+  const panel=el('section',{class:'panel'},el('h2',{},'本机阅读缓存'),details,
+    el('p',{class:'muted'},'最多保存最近 20 篇文章及相关词表、讲解，容量上限 50 MB。优先显示本机内容，后台核对更新；缓存只属于当前浏览器。'),
+    el('div',{class:'row'},button('立即同步阅读记录',action(async()=>{
+      await ReadingSync.drain();await refresh();toast(ReadingSync.pending()?'还有记录等待同步':'阅读记录已同步');
+    })),button('清空阅读缓存',action(async()=>{
+      cacheEpoch++;await ReadingCache.clear();await refresh();toast('本机阅读缓存已清空，未同步记录和服务器数据保留');
+    }))));
+  async function refresh(){const info=await ReadingCache.info();
+    details.textContent=`已缓存 ${info.articles} 篇 · ${(info.bytes/1024/1024).toFixed(1)} / 50 MB · ${ReadingSync.pending()} 条阅读记录待同步`+
+      (info.persistent?'':' · 浏览器持久缓存不可用，当前使用临时缓存');}
+  refresh();return panel;
 }
 
 function syncSettingsPanel(initial) {
@@ -1372,14 +1590,14 @@ function editModel(initial) {
   showSheet('编辑模型配置',form);
 }
 
-async function route() {
+async function route({refresh=false}={}) {
   clearTimeout(toastTimer);$('#toast').hidden=true;
   state.reader?.touchCleanup?.();
   state.reader?.hoverCleanup?.();
   clearTimeout(state.settingsTimer);
   if(!state.csrf){showLogin();return;}
   state.statsCleanup?.();state.statsCleanup=null;
-  if(state.reader){await Promise.all([saveProgress(true),stopReadingClock(state.reader)]);document.removeEventListener('selectionchange',state.reader.selectionHandler);
+  if(state.reader){saveProgress(true);stopReadingClock(state.reader);document.removeEventListener('selectionchange',state.reader.selectionHandler);
     window.removeEventListener('resize',state.reader.selectionResize);
     window.visualViewport?.removeEventListener('resize',state.reader.selectionResize);
     window.visualViewport?.removeEventListener('scroll',state.reader.selectionResize);}
@@ -1387,6 +1605,7 @@ async function route() {
   state.reader=null;state.selection=null;
   closeSheet();
   const token=++state.route;$('#navigation').hidden=false;
+  state.forceReadingRefresh=refresh;
   const [path,query='']=(location.hash.slice(1)||'/library').split('?');
   const parts=path.split('/').filter(Boolean).map(decodeURIComponent);
   const requestedParagraph=new URLSearchParams(query).get('paragraph');
@@ -1399,9 +1618,10 @@ async function route() {
     else if(parts[0]==='settings')await settingsPage(token);
     else if(parts[0]==='reading-stats')await readingStatsPage(token);
     else await library(token);
-  }catch(error){if(token===state.route&&state.csrf)view.replaceChildren(empty('暂时无法打开',error.message),button('重试',()=>route(),'primary'));}
+  }catch(error){if(token===state.route&&state.csrf)view.replaceChildren(empty('暂时无法打开',error.message),button('重试',()=>route({refresh:true}),'primary'));}
+  finally{if(token===state.route)state.forceReadingRefresh=false;}
 }
 window.addEventListener('hashchange',route);
 window.addEventListener('pagehide',()=>{readingClockTick();flushReadingClock(state.reader,true);saveProgress(true);});
 document.addEventListener('visibilitychange',()=>{readingClockTick();if(document.hidden){flushReadingClock(state.reader,true);saveProgress(true);}else if(state.reader?.clock)state.reader.clock.lastInteraction=performance.now();});
-(async()=>{try{const session=await api('/session');if(session.authenticated){state.csrf=session.csrf;await route();}else showLogin();}catch(error){view.replaceChildren(empty('连接服务器失败',error.message));}})();
+(async()=>{try{const session=await api('/session');if(session.authenticated){state.csrf=session.csrf;await initReadingStorage(session);await route();}else{ReadingSync.reset();await ReadingCache.init('');await ReadingCache.clear();showLogin();}}catch(error){view.replaceChildren(empty('连接服务器失败',error.message));}})();

@@ -77,6 +77,18 @@
 
 本文含义在后台生成，界面显示接收进度。相同选中位置、语境和模型的结果会复用缓存；词典或个人释义可展开查看，未配置模型时仍可查词收藏，失败时可重试。解释随生词本最近来源保存，不覆盖手工修改的释义或笔记，也不改变阅读位置。只向配置的模型发送标题和有长度限制的相关上下文，不发送整本刊物。缓存和生词本均保存在仓库外的应用数据目录。
 
+## 本机阅读缓存与弱网访问
+
+手机和 PC 浏览器均会缓存最近阅读的正文、摘要、目录、生词表、已查看的本文词义及句子讲解。每个浏览器最多缓存最近 **20 篇文章**，阅读数据总量上限 **50 MB**，按最近使用顺序自动淘汰。无需手动开启，也不会预下载整本刊物或自动调用模型。
+
+重复进入时优先显示本机内容，再在后台核对服务器；短时间连续打开段落生词窗口复用词表，不重复请求整篇词表。服务器正文变化时会提示刷新，保持当前原文和阅读位置稳定；生成词表、收藏或编辑词条后更新相关数据。静态脚本和样式使用内容版本缓存，封面使用浏览器私有缓存。
+
+阅读位置立即保存在本机，计时以累计采样记录暂存，后台依次同步；上传尚未完成也可切换页面。网络恢复、重新打开网页或点击「设置 → 本机阅读缓存 → 立即同步阅读记录」会重试最近七天的记录，重复提交不会重复累计计时，旧位置不会覆盖服务器上较新的位置。显示「本机已保存 · 待同步」时，请在迁移或清理浏览器数据前先完成同步。多设备重叠计时仍遵守单个阅读者的去重规则。
+
+设置中可查看缓存用量并清空阅读缓存；清空缓存保留未同步记录及服务器原始数据。退出登录会清理本机阅读缓存和同步暂存，退出前会尝试完成上传；网络异常时请先等待同步成功。LLM 密钥、访问密码、独立密码和配置接口不纳入缓存。
+
+这是弱网访问优化：已打开的网页可以继续浏览已缓存内容；完全断网后从头加载网页、首次打开未缓存文章、查新词、首次生成词表和调用模型仍需要网络。浏览器可能清理本地存储，缓存不作为备份；无痕模式或存储被禁用时，持久缓存可能不可用。域名、端口或浏览器不同，缓存分别保存。
+
 ## 已读统计与 Chrome 阅读同步
 
 导航「已读统计」汇总整个书库和插件上传的已读文章，首页也会显示累计文章数和词数。Web 正文读到结尾（进度至少 99.5%）或手动标记「已读」后计入，单纯打开长文章不会计入。阅读过的文章回滚位置仍保留完成记录；在目录中改为「未读」或「不感兴趣」，会移除这个刊物中的完成记录，其他已读出处仍保留。
@@ -221,6 +233,7 @@ python tests/run_web_tests.py
 python tests/run_login_security_tests.py
 python tests/run_access_upload_tests.py
 python tests/run_reading_stats_tests.py
+python tests/run_reading_cache_tests.py
 python tests/run_article_duplicate_tests.py
 python tests/run_podcast_tests.py
 python tests/run_word_meaning_tests.py
@@ -232,6 +245,7 @@ python tests/run_access_upload_browser_tests.py
 python tests/run_article_duplicate_browser_tests.py
 python tests/run_podcast_browser_tests.py
 python tests/run_lookup_browser_tests.py
+python tests/run_reading_cache_browser_tests.py
 python tests/run_phrase_browser_tests.py
 python tools/check_public_files.py
 ```

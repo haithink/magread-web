@@ -133,6 +133,20 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare
     password_slots = threading.BoundedSemaphore(2)
     podcast_jobs = {}
     started = time.time()
+    cache_scope = hashlib.sha256(('reading-cache-v1:' + auth['secret']).encode()).hexdigest()[:24]
+
+    def reading_identity():
+        settings = config.settings_path()
+        revision = str(settings.stat().st_mtime_ns) if settings.exists() else '0'
+        return dict(cacheScope=cache_scope, modelRevision=hashlib.sha256(revision.encode()).hexdigest()[:16],
+                    serverTime=int(time.time()*1000))
+
+    def content_version(art):
+        return hashlib.sha256(json.dumps(art, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:24]
+
+    def check_content_version(art, data):
+        if data.get('contentVersion') and data['contentVersion'] != content_version(art):
+            abort(400, '文章正文已更新，请刷新后继续同步阅读记录')
 
     def book(book_id):
         if not BOOK_ID.fullmatch(book_id) or book_id in ('.', '..'):
@@ -287,6 +301,16 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare
             'X-Frame-Options': 'SAMEORIGIN', 'Cache-Control': 'no-store',
             'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
                 "connect-src 'self'; frame-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; form-action 'self'"})
+        if request.method in ('GET', 'HEAD') and response.status_code in (200, 304):
+            if request.endpoint == 'static':
+                version = hashlib.sha256((STATIC / request.view_args['name']).read_bytes()).hexdigest()[:16]
+                response.headers['Cache-Control'] = 'public, max-age=31536000, immutable' if request.args.get('v') == version else 'no-cache'
+            elif request.endpoint == 'cover':
+                response.headers['Cache-Control'] = 'private, max-age=3600'
+            elif response.status_code == 200 and request.endpoint in ('library', 'digest', 'read', 'vocabulary'):
+                response.set_etag(hashlib.sha256(response.get_data()).hexdigest())
+                response.headers['Cache-Control'] = 'private, no-cache'
+                response.make_conditional(request)
         return response
 
     @app.errorhandler(Exception)
@@ -300,11 +324,15 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare
 
     @app.get('/')
     def index():
-        return send_file(STATIC / 'index.html')
+        html = (STATIC / 'index.html').read_text(encoding='utf-8')
+        for name in ('app.js', 'app.css', 'icon.svg', 'reading-charts.js', 'reading-cache.js'):
+            version = hashlib.sha256((STATIC / name).read_bytes()).hexdigest()[:16]
+            html = html.replace('/static/' + name, '/static/' + name + '?v=' + version)
+        return app.response_class(html, mimetype='text/html')
 
     @app.get('/static/<name>')
     def static(name):
-        if name not in ('app.js', 'app.css', 'icon.svg', 'reading-charts.js'):
+        if name not in ('app.js', 'app.css', 'icon.svg', 'reading-charts.js', 'reading-cache.js'):
             abort(404)
         return send_file(STATIC / name)
 
@@ -314,7 +342,8 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare
 
     @app.get('/api/session')
     def get_session():
-        return jsonify(authenticated=bool(session.get('authenticated')), csrf=session.get('csrf'), version=__version__)
+        return jsonify(authenticated=bool(session.get('authenticated')), csrf=session.get('csrf'), version=__version__,
+                       **(reading_identity() if session.get('authenticated') else {}))
 
     @app.post('/api/login')
     def login():
@@ -344,7 +373,7 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare
         session.clear()
         session.update(authenticated=True, csrf=secrets.token_urlsafe(24))
         session.permanent = True
-        return jsonify(csrf=session['csrf'])
+        return jsonify(csrf=session['csrf'], **reading_identity())
 
     @app.post('/api/logout')
     def logout():
@@ -575,6 +604,7 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare
         meta, art = article(book_id, index)
         summary = next((a for a in (store.load_digest(book_id) or {}).get('articles', []) if a['index'] == index), {})
         return jsonify(article=art, titleZh=summary.get('titleZh', ''), summaryZh=summary.get('summaryZh', ''),
+            contentVersion=content_version(art),
             bookTitle=meta.get('title') or meta['fileName'], ext=meta['ext'], history=store.load_reading_history(book_id).get(str(index)),
             sourceUrl=meta.get('sourceUrl', ''), excerpted=bool((store.load_digest(book_id) or {}).get('excerpted')),
             parentBookId=podcast_library.parent_id(meta),
@@ -585,12 +615,15 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare
     @app.post('/api/books/<book_id>/articles/<int:index>/reading-time')
     def reading_time(book_id,index):
         meta,art = article(book_id,index)
-        return jsonify(reading_activity.record(meta,art,payload()))
+        data = payload()
+        check_content_version(art, data)
+        return jsonify(reading_activity.record(meta,art,data))
 
     @app.post('/api/books/<book_id>/articles/<int:index>/progress')
     def save_progress(book_id, index):
         meta, art = article(book_id, index)
         data = payload()
+        check_content_version(art, data)
         para = data.get('paragraphIndex')
         offset = data.get('paragraphOffset', 0)
         if type(para) is not int or not 0 <= para < len(art['paragraphs']) or type(offset) is not int or offset < 0:
@@ -599,10 +632,18 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare
         progress = (sum(len(p) for p in art['paragraphs'][:para]) + offset) / max(1, sum(len(p) for p in art['paragraphs']))
         with data_lock:
             previous = store.load_reading_history(book_id).get(str(index), {})
+            observed = data.get('observedAt')
+            if observed is not None:
+                now = int(time.time()*1000)
+                if type(observed) is not int or not now-7*86_400_000 <= observed <= now+30_000:
+                    abort(400, '阅读记录时间无效或已超过七天')
+                observed = min(observed, now)
+                if observed < previous.get('lastReadAt', 0):
+                    return jsonify(record=previous, accepted=False)
             record = store.save_reading_progress(book_id, index, dict(title=art['title'], titleZh='',
                 paragraphIndex=para, paragraphOffset=offset, paragraphCount=len(art['paragraphs']),
                 paragraphStart=art['paragraphs'][para][:100], wordCount=len(gen._TOKEN.findall(' '.join(art['paragraphs']))),
-                progress=progress, atStart=para == 0 and offset == 0, atEnd=progress >= .995))
+                progress=progress, atStart=para == 0 and offset == 0, atEnd=progress >= .995), read_at=observed)
             if record['atEnd'] and not previous.get('atEnd'):
                 reading_stats.mark_web(meta, art, True)
                 store.set_article_state(book_id, index, 'read')
@@ -615,7 +656,7 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare
         cached = store.load_vocab(book_id, index, level)
         vocab = wordbook.overlay(gen.audit_phrase_coverage(cached, art) if cached else None, art, level)
         missing = [i for i in range(len(art['paragraphs'])) if i not in (cached or {}).get('processedParagraphs', [])]
-        return jsonify(vocab=vocab, missing=missing, generated=bool(cached), level=level)
+        return jsonify(vocab=vocab, missing=missing, generated=bool(cached), level=level, contentVersion=content_version(art))
 
     @app.post('/api/books/<book_id>/articles/<int:index>/lookup')
     def lookup(book_id, index):

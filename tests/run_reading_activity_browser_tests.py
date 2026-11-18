@@ -11,6 +11,7 @@ from playwright.sync_api import sync_playwright, expect
 from browser_helpers import reader_button
 from run_web_tests import WebTests, config, store, llm
 from webapp import reading_activity as activity, reading_stats
+from webapp import server as server_module
 
 
 def check_vocabulary_waits(page, now):
@@ -97,13 +98,14 @@ def main():
     WebTests.setUpClass()
     paragraph=' '.join(['Reading science requires patience and attention to each carefully written paragraph.']*20)
     article=dict(index=0,title='Reading with curiosity',paragraphs=[paragraph for _ in range(32)])
-    old=dict(index=1,title='An untimed historical article',paragraphs=[paragraph])
+    old=dict(index=2,title='An untimed historical article',paragraphs=[paragraph])
+    navigation=dict(old,index=1,title='A briefly opened navigation target')
     store._atomic_json_write(store._cache_dir('sample')/'content.json',dict(
-        bookSize=WebTests.meta['size'],format='epub',articles=[article,old]))
+        bookSize=WebTests.meta['size'],format='epub',articles=[article,navigation,old]))
     now=[int(datetime.now(timezone.utc).timestamp()*1000)]
-    fake_time=types.SimpleNamespace(time_ns=lambda:now[0]*1_000_000)
+    fake_time=types.SimpleNamespace(time_ns=lambda:now[0]*1_000_000,time=lambda:now[0]/1000,monotonic=server_module.time.monotonic)
     errors=[]
-    with patch.object(activity,'time',fake_time),patch.object(llm,'conversation',side_effect=AssertionError('No paid model')):
+    with patch.object(activity,'time',fake_time),patch.object(server_module,'time',fake_time),patch.object(llm,'conversation',side_effect=AssertionError('No paid model')):
         # Populate a genuine ledger with a mix of reading days and zero days.
         for i in [18,16,13,12,10,7,4,3,2,1]:
             now[0]=int((datetime.now(timezone.utc)-timedelta(days=i)).replace(hour=12,minute=0,second=0).timestamp()*1000)
@@ -115,7 +117,7 @@ def main():
             now[0]+=60_000
             activity.record(meta,art,dict(sample,sequence=1,elapsedMs=60_000,paragraphIndex=1,paragraphOffset=i*8))
             data=reading_stats.load();reading_stats.merge(data,reading_stats.web_source(meta,art,now[0]));reading_stats.save(data)
-        store.set_article_state('sample',1,'read')
+        store.set_article_state('sample',2,'read')
         now[0]=int(datetime.now(timezone.utc).timestamp()*1000)
         server=make_server('127.0.0.1',0,WebTests.app)
         thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
@@ -137,8 +139,10 @@ def main():
                     assert page.locator('#reader-options #reading-time-toggle').count()==0
                     page.wait_for_function('() => state.reader?.clock?.lastSaved')
                     before=activity.article_timing('sample',0)['activeMs']
+                    lost=[False]
                     def lose_first_reply(route):
-                        if route.request.post_data_json.get('sequence')==1:
+                        if route.request.post_data_json.get('sequence')==1 and not lost[0]:
+                            lost[0]=True
                             assert route.fetch().ok
                             route.abort('failed')
                         else:

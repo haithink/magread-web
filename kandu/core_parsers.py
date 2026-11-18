@@ -546,12 +546,12 @@ def load_reading_history(book_id: str) -> dict:
             if key.isdecimal() and (record := _reading_record(value)) is not None}
 
 
-def save_reading_progress(book_id: str, article_index: int, progress: dict) -> dict:
+def save_reading_progress(book_id: str, article_index: int, progress: dict, *, read_at=None) -> dict:
     import time
 
     if type(article_index) is not int or article_index < 0:
         raise ValueError("文章索引必须是非负整数")
-    record = _reading_record(dict(progress, lastReadAt=int(time.time() * 1000)))
+    record = _reading_record(dict(progress, lastReadAt=int(time.time() * 1000) if read_at is None else read_at))
     if record is None:
         raise ValueError("阅读位置无效")
     history = load_reading_history(book_id)
