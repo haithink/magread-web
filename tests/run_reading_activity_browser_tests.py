@@ -51,6 +51,10 @@ def check_vocabulary_waits(page, now):
                 now[0]+=15_000;page.clock.run_for(15_000)
                 assert page.evaluate('() => state.reader.clock.elapsedMs')==elapsed,'Viewing generated words must pause'
                 page.locator('#sheet-close').click()
+            else:
+                # Completed requests now return their error/stop notice to the center.
+                expect(page.locator('#sheet')).to_be_visible()
+                page.locator('#sheet-close').click()
             if terminal=='stopped':
                 expect(page.locator('#reader-reading-time')).to_contain_text('已暂停')
                 page.get_by_role('button',name='继续计时',exact=True).click()

@@ -12,7 +12,7 @@ const el = (tag, attrs = {}, ...children) => {
   return node;
 };
 const button = (text, callback, cls = '') => el('button', {type:'button', class:cls, onclick:callback}, text);
-const state = {csrf:'', route:0, reader:null, selection:null, activeJobs:new Map(), jobObservers:new Map(), vocabWaits:new Map(), sheet:0};
+const state = {csrf:'', route:0, reader:null, selection:null, activeJobs:new Map(), jobObservers:new Map(), vocabWaits:new Map(), sheet:0, sheetWait:null};
 const view = $('#app');
 // Older installed reading extensions also listen on document. Keep our reader and
 // dialog mouse events local so one gesture cannot start another model request.
@@ -51,25 +51,117 @@ function linkFor(bookId, index, paragraph=null) {
   return `#/read/${encodeURIComponent(bookId)}/${index}`+(Number.isInteger(paragraph)?`?paragraph=${paragraph}`:'');
 }
 function baseFor(reader=state.reader) { return `/books/${encodeURIComponent(reader.bookId)}/articles/${reader.index}`; }
-function showSheet(title, content) {
+let sheetCloseEvents=0;
+function hideSheetDialog() {
+  if($('#sheet').open){sheetCloseEvents++;$('#sheet').close();}
+}
+function clearSheetWait() {
+  const wait=state.sheetWait;if(!wait)return;
+  cancelAnimationFrame(wait.frame);
+  for(const name of ['scroll','resize'])window.removeEventListener(name,wait.reposition);
+  for(const name of ['scroll','resize'])window.visualViewport?.removeEventListener(name,wait.reposition);
+  wait.card.remove();state.sheetWait=null;
+  $('#sheet-background').hidden=true;
+}
+function closeSheet() {
+  readingClockTick();state.sheet++;clearSheetWait();hideSheetDialog();readingClockTick();
+}
+function centerSheet() {
+  const x=scrollX,y=scrollY;
+  readingClockTick();
+  if(!$('#sheet').open)$('#sheet').showModal();
+  window.scrollTo({left:x,top:y,behavior:'instant'});
+  readingClockTick();flushReadingClock();
+}
+function positionSheetWait() {
+  const wait=state.sheetWait;if(!wait||wait.card.hidden)return;
+  const viewport=window.visualViewport;
+  const left=viewport?.offsetLeft||0,top=viewport?.offsetTop||0;
+  const width=viewport?.width||innerWidth,height=viewport?.height||innerHeight;
+  const card=wait.card,body=$('#reader-body');if(!body)return;
+  card.style.width=Math.min(272,width-24)+'px';
+  const bounds=card.getBoundingClientRect(),prose=body.getBoundingClientRect();
+  let x=left+width-bounds.width-12,y=top+height-bounds.height-12;
+  if(x<prose.right+12) {
+    if(prose.left-left>=bounds.width+24)x=left+12;
+    else {
+      let anchor=wait.range?.startContainer.isConnected?wait.range.getBoundingClientRect():null;
+      if(!anchor||anchor.bottom<top||anchor.top>top+height) {
+        const index=currentPosition(wait.reader)?.paragraphIndex??wait.paragraph;
+        anchor=$(`#para-${index} p`)?.getBoundingClientRect();
+      }
+      // Narrow screens have no side gutter: choose the edge furthest from
+      // the selected line. Keep the card compact and the prose interactive.
+      if(anchor&&anchor.bottom>y&&anchor.top<top+height)y=top+12;
+    }
+  }
+  card.style.left=x+'px';card.style.top=y+'px';
+}
+function dockSheet(sheet) {
+  const wait=state.sheetWait;if(!wait||sheet!==state.sheet)return;
+  const x=scrollX,y=scrollY,wasOpen=$('#sheet').open;
+  readingClockTick();hideSheetDialog();wait.card.hidden=false;
+  $('#sheet-background').hidden=true;
+  if(wasOpen)view.focus({preventScroll:true});
+  window.scrollTo({left:x,top:y,behavior:'instant'});
+  positionSheetWait();readingClockTick();
+}
+function waitForSheet(sheet, reader, paragraph=null, status='正在准备请求…') {
+  if(sheet!==state.sheet||state.reader!==reader)return;
+  if(!state.sheetWait) {
+    const selection=getSelection(),range=selection&&!selection.isCollapsed?selection.getRangeAt(0).cloneRange():null;
+    const title=el('strong',{},$('#sheet-title').textContent),label=el('p',{class:'sheet-wait-status','aria-live':'polite'},status);
+    const card=el('aside',{id:'sheet-wait',role:'region','aria-label':'AI 请求进度'},
+      el('div',{class:'sheet-wait-head'},el('span',{class:'spinner','aria-hidden':'true'}),title,
+        button('×',closeSheet,'sheet-wait-close')),
+      label,el('div',{class:'sheet-wait-footer'},el('small',{},'可继续阅读 · 完成后自动展开'),
+        button('查看',()=>{if(sheet!==state.sheet)return;card.hidden=true;$('#sheet-background').hidden=false;centerSheet();},'text-button')));
+    $('.sheet-wait-close',card).setAttribute('aria-label','关闭等待提示');
+    $('.sheet-wait-close',card).title='关闭提示，已提交的任务继续在后台执行';
+    const wait=state.sheetWait={sheet,reader,paragraph,range,card,label,frame:null};
+    wait.reposition=()=>{if(!wait.frame)wait.frame=requestAnimationFrame(()=>{wait.frame=null;positionSheetWait();});};
+    document.body.append(card);
+    getSelection()?.removeAllRanges();
+    for(const name of ['scroll','resize'])window.addEventListener(name,wait.reposition,{passive:true});
+    for(const name of ['scroll','resize'])window.visualViewport?.addEventListener(name,wait.reposition,{passive:true});
+  }
+  state.sheetWait.label.textContent=status;dockSheet(sheet);
+}
+function updateSheetWait(sheet,status) {
+  if(sheet===state.sheet&&state.sheetWait)state.sheetWait.label.textContent=status||'正在等待模型响应…';
+}
+function finishSheetWait(sheet) {
+  if(sheet!==state.sheet)return false;
+  if(state.sheetWait&&state.sheetWait.reader!==state.reader)return false;
+  clearSheetWait();centerSheet();return true;
+}
+function showSheet(title, content, wait=null) {
   state.reader?.hoverHide?.();
   if(state.reader?.clock){readingClockTick(state.reader);flushReadingClock(state.reader);}
+  const x=scrollX,y=scrollY;
+  clearSheetWait();hideSheetDialog();
   state.sheet += 1;
   $('#sheet-title').textContent = title;
   $('#sheet-content').replaceChildren(content);
-  if (!$('#sheet').open) $('#sheet').showModal();
+  if(wait)waitForSheet(state.sheet,wait.reader,wait.paragraph,wait.status);
+  else centerSheet();
+  window.scrollTo({left:x,top:y,behavior:'instant'});
+  const selectionBar=$('#selection-tools');if(selectionBar)selectionBar.hidden=true;
   return state.sheet;
 }
-$('#sheet-close').onclick = () => $('#sheet').close();
-$('#sheet').addEventListener('click', event => { if (event.target === $('#sheet')) { const r=$('#sheet').getBoundingClientRect(); if(event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom) $('#sheet').close(); } });
-$('#sheet').addEventListener('close', () => { state.sheet += 1; });
+$('#sheet-close').before(el('button',{id:'sheet-background',type:'button',hidden:true,onclick:()=>dockSheet(state.sheet)},'继续阅读'));
+$('#sheet-close').onclick = closeSheet;
+$('#sheet').addEventListener('cancel',event=>{event.preventDefault();closeSheet();});
+$('#sheet').addEventListener('click', event => { if (event.target === $('#sheet')) { const r=$('#sheet').getBoundingClientRect(); if(event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom) closeSheet(); } });
+$('#sheet').addEventListener('close', () => { if(sheetCloseEvents){sheetCloseEvents--;return;}state.sheet++;clearSheetWait(); });
+document.addEventListener('keydown',event=>{if(event.key==='Escape'&&state.sheetWait&&!$('#sheet').open){event.preventDefault();closeSheet();}});
 $('#logout').onclick = action(async () => { if(state.reader){state.reader.hoverCleanup?.();await stopReadingClock(state.reader);}await api('/logout', {method:'POST', data:{}}); state.csrf=''; state.reader=null; showLogin(); });
 
 function showLogin() {
   state.reader?.hoverCleanup?.();
   if(state.reader)stopReadingClock(state.reader,false);
   $('#navigation').hidden = true;
-  if ($('#sheet').open) $('#sheet').close();
+  closeSheet();
   view.replaceChildren($('#login-template').content.cloneNode(true));
   $('#login-form').onsubmit = async event => {
     event.preventDefault(); const submit=$('button', event.target); submit.disabled=true;
@@ -85,17 +177,17 @@ function displayJobBar() {
   $('#jobbar').hidden=state.activeJobs.size===0;
   if(state.activeJobs.size) $('#job-status').textContent=[...state.activeJobs.values()].map(j=>j.status).join(' · ');
 }
-async function runJob(path, data={}, onDone, onUpdate) {
+async function runJob(path, data={}, onDone, onUpdate, onFailure) {
   const settled=path.endsWith('/generate-vocab')?pauseVocabularyGeneration(path):()=>{};
   try {
     const {jobId}=await api(path,{method:'POST',data});
     if(state.activeJobs.has(jobId))toast('这个任务已经在进行中');
-    return watchJob(jobId,onDone,onUpdate,settled);
+    return watchJob(jobId,onDone,onUpdate,settled,onFailure);
   } catch(error) {settled();throw error;}
 }
-function watchJob(jobId,onDone,onUpdate,onSettled) {
+function watchJob(jobId,onDone,onUpdate,onSettled,onFailure) {
   if(!state.jobObservers.has(jobId))state.jobObservers.set(jobId,[]);
-  state.jobObservers.get(jobId).push({onDone,onUpdate,onSettled});
+  state.jobObservers.get(jobId).push({onDone,onUpdate,onSettled,onFailure});
   if(state.activeJobs.has(jobId))return jobId;
   const started=Date.now(); state.activeJobs.set(jobId,{status:'任务已提交'}); displayJobBar();
   const poll=async()=>{
@@ -118,6 +210,7 @@ function watchJob(jobId,onDone,onUpdate,onSettled) {
       const observers=state.jobObservers.get(jobId)||[];
       state.activeJobs.delete(jobId);state.jobObservers.delete(jobId);
       for(const observer of observers)if(observer.onSettled)observer.onSettled();
+      for(const observer of observers)if(observer.onFailure)observer.onFailure(error);
       displayJobBar(); toast('连接中断，服务器任务仍会保存结果。'+error.message);
     }
   };
@@ -242,7 +335,7 @@ async function uploadSheet() {
       if(file.files[0].size>quota.remainingBytes)throw new Error('今日上传额度不足，每日累计最多 500 MB，请明天再试');
       const body=new FormData();body.append('file',file.files[0]);
       const {jobId}=await api('/books',{method:'POST',form:body,uploadSize:file.files[0].size});
-      $('#sheet').close();
+      closeSheet();
       state.activeJobs.set(jobId,{status:'正在添加刊物'});displayJobBar();
       const poll=async()=>{
         try{const job=await api('/jobs/'+jobId);state.activeJobs.set(jobId,{status:job.status});displayJobBar();
@@ -310,7 +403,7 @@ async function digestPage(bookId,token) {
     const error=el('p',{class:'error',role:'alert',hidden:true});
     const submit=el('button',{type:'submit',class:'primary'},'保存标签');
     const form=el('form',{class:'form-stack'},el('p',{class:'muted'},'用逗号分隔，最多 8 个标签，每个不超过 24 个字；清空后保存可移除全部标签。'),input,error,
-      el('div',{class:'row'},submit,button('取消',()=>$('#sheet').close())));
+      el('div',{class:'row'},submit,button('取消',()=>closeSheet())));
     form.onsubmit=async event=>{
       event.preventDefault();submit.disabled=true;error.hidden=true;
       try{
@@ -318,7 +411,7 @@ async function digestPage(bookId,token) {
           method:'POST',data:{tags:input.value.split(/[,，、;；\n]+/).map(s=>s.trim()).filter(Boolean)}});
         if(token!==state.route)return;
         a.tags=result.tags;$('.article-tags',cards.get(a.index)).replaceWith(tagRow(a));
-        if(sheet===state.sheet)$('#sheet').close();render();toast('标签已保存');
+        if(sheet===state.sheet)closeSheet();render();toast('标签已保存');
       }catch(failure){error.textContent=failure.message;error.hidden=false;}finally{submit.disabled=false;}
     };
     const sheet=showSheet('编辑文章标签',form);input.focus();
@@ -809,7 +902,7 @@ function sourceNode(source) {
   const canOpen=typeof source.bookId==='string'&&Number.isInteger(source.articleIndex)&&source.articleIndex>=0;
   const paragraph=Number.isInteger(source.paragraph)?source.paragraph:null;
   const heading=canOpen?el('a',{class:'word-source-link',href:linkFor(source.bookId,source.articleIndex,paragraph),
-    onclick:()=>{if($('#sheet').open)$('#sheet').close();}},title+' ↗'):el('span',{class:'word-source-link'},title);
+    onclick:()=>{closeSheet();}},title+' ↗'):el('span',{class:'word-source-link'},title);
   const time=Number(source.recordedAt);
   const when=Number.isFinite(time)&&time>0?new Date(time):null;
   const location=paragraph===-1?'文章标题':paragraph===null?'文章收藏':`第 ${paragraph+1} 段`;
@@ -838,20 +931,32 @@ async function openVocab(paragraph) {
   await loadVocab(reader);if(state.reader!==reader)return;
   // Toolbar starts full generation directly for ungenerated/partial article vocabulary.
   if(paragraph===null&&(!reader.vocab.generated||reader.vocab.missing.length)) {
-    await runJob(baseFor(reader)+'/generate-vocab',{},async job=>{if(job.state==='done'&&state.reader===reader){await loadVocab(reader);await vocabSheet(reader,null);}});return;
+    await generateReaderVocab(reader,null);return;
   }
   await vocabSheet(reader,paragraph);
+}
+async function generateReaderVocab(reader,paragraph,request={}) {
+  const output=el('div',{},el('p',{class:'muted'},'正在生成生词与短语…'));
+  const sheet=showSheet('生词与短语',output,{reader,paragraph});
+  const failure=message=>{if(sheet!==state.sheet)return;output.replaceChildren(el('p',{class:'error'},message));finishSheetWait(sheet);};
+  try {
+    await runJob(baseFor(reader)+'/generate-vocab',request,async job=>{
+      if(state.reader!==reader)return;
+      if(job.state!=='done'){failure(job.error||'生成已停止，可再次补缺');return;}
+      try {
+        await loadVocab(reader);
+        if(sheet===state.sheet&&state.reader===reader)await vocabSheet(reader,paragraph);
+      }catch(error){failure('生词已生成，加载词表失败：'+error.message);}
+    },job=>updateSheetWait(sheet,job.status),()=>failure('连接中断，服务器任务仍会保存结果。可稍后重新打开生词表。'));
+  }catch(error){failure(error.message);}
 }
 async function vocabSheet(reader,paragraph) {
   if(state.reader!==reader)return;
   const data=reader.vocab,body=el('div');
   const missing=paragraph===null?data.missing.length:data.missing.includes(paragraph);
   if(missing)body.append(el('p',{class:'notice'},paragraph===null?`全文还有 ${data.missing.length} 段待生成，当前只展示已有词条和个人收藏。`:'本段生词尚未生成，当前只展示已有词条和个人收藏。'));
-  const actions=el('div',{class:'row'},button('生成 / 补缺全文生词',action(()=>runJob(baseFor(reader)+'/generate-vocab',{},async job=>{
-    if(job.state==='done'&&state.reader===reader){await loadVocab(reader);vocabSheet(reader,paragraph);}
-  })),'primary'),button('补充短语解释',action(()=>runJob(baseFor(reader)+'/generate-vocab',{phrasesOnly:true,paragraph},async job=>{
-    if(job.state==='done'&&state.reader===reader){await loadVocab(reader);vocabSheet(reader,paragraph);}
-  }))));body.append(actions);
+  const actions=el('div',{class:'row'},button('生成 / 补缺全文生词',action(()=>generateReaderVocab(reader,paragraph)),'primary'),
+    button('补充短语解释',action(()=>generateReaderVocab(reader,paragraph,{phrasesOnly:true,paragraph}))));body.append(actions);
   const search=el('input',{type:'search',class:'search',placeholder:'查找词条…','aria-label':'查找词条'}),list=el('div');
   body.append(el('div',{class:'filters'},search),list);
   function render(){
@@ -868,12 +973,12 @@ async function vocabSheet(reader,paragraph) {
 async function lookupSelection(reader) {
   const chosen={...state.selection};if(!chosen.quote)return;
   const output=el('div',{},el('p',{class:'muted'},'正在查词…'));
-  const sheet=showSheet('查词 · 本文含义',output);
+  const sheet=showSheet('查词 · 本文含义',output,{reader,paragraph:chosen.paragraph,status:'正在查词…'});
   $('#selection-tools').hidden=true;
   const request={word:chosen.quote,paragraph:chosen.paragraph,start:chosen.start};
   let response;
   try{response=await api(baseFor(reader)+'/lookup',{method:'POST',data:request});}
-  catch(error){if(sheet===state.sheet)output.replaceChildren(el('p',{class:'error'},error.message));return;}
+  catch(error){if(sheet===state.sheet){output.replaceChildren(el('p',{class:'error'},error.message));finishSheetWait(sheet);}return;}
   if(sheet!==state.sheet)return;
   const context=el('section',{class:'lookup-context','aria-live':'polite'});
   const details=el('details',{class:'lookup-dictionary'},el('summary',{},'词典 / 个人释义 · 已加入个人生词本'),
@@ -883,18 +988,19 @@ async function lookupSelection(reader) {
   const refreshVocab=()=>{if(state.reader===reader)return loadVocab(reader);};
   const explain=async()=>{
     context.replaceChildren(el('p',{class:'muted'},'AI 正在结合当前句子与段落解释…'));
+    waitForSheet(sheet,reader,chosen.paragraph,'AI 正在结合本文解释词义…');
     try {
       await runJob(baseFor(reader)+'/lookup-context',{...request,savedWord:response.saved.word},async job=>{
         if(sheet!==state.sheet)return;
-        if(job.state==='done'){context.replaceChildren(contextMeaningNode(job.result.meaning));await refreshVocab();}
+        if(job.state==='done'){context.replaceChildren(contextMeaningNode(job.result.meaning));finishSheetWait(sheet);await refreshVocab();}
         else showFailure(job.error||'本文解释未完成');
-      },job=>{if(sheet===state.sheet&&job.state!=='done'&&$('p.muted',context))$('p.muted',context).textContent=job.status;});
+      },job=>{if(sheet===state.sheet&&job.state!=='done'&&$('p.muted',context)){$('p.muted',context).textContent=job.status;updateSheetWait(sheet,job.status);}},()=>{if(sheet===state.sheet)showFailure('连接中断，服务器仍会保存结果，请稍后重试。');});
     }catch(error){if(sheet===state.sheet)showFailure(error.message);}
   };
-  const showFailure=message=>{details.open=true;context.replaceChildren(el('p',{class:'muted'},'本文含义暂未生成：'+message),button('重试本文解释',action(explain)));};
-  if(response.contextMeaning)context.append(contextMeaningNode(response.contextMeaning));
+  const showFailure=message=>{details.open=true;context.replaceChildren(el('p',{class:'muted'},'本文含义暂未生成：'+message),button('重试本文解释',action(explain)));finishSheetWait(sheet);};
+  if(response.contextMeaning){context.append(contextMeaningNode(response.contextMeaning));finishSheetWait(sheet);}
   else if(response.canExplain)await explain();
-  else {details.open=true;context.append(el('p',{class:'muted'},'配置 LLM 后，可结合本文语境解释词义。'),el('a',{href:'#/settings'},'前往设置 →'));}
+  else {details.open=true;context.append(el('p',{class:'muted'},'配置 LLM 后，可结合本文语境解释词义。'),el('a',{href:'#/settings'},'前往设置 →'));finishSheetWait(sheet);}
   await refreshVocab();
 }
 function contextMeaningNode(meaning,compact=false) {
@@ -907,12 +1013,17 @@ function contextMeaningNode(meaning,compact=false) {
 async function analyzeSelection(reader) {
   const chosen={...state.selection};if(!chosen.quote)return;
   const output=el('div',{},el('p',{class:'quote'},chosen.quote),el('p',{class:'muted'},'正在准备句子讲解…'));
-  const sheet=showSheet('句子讲解',output);
-  await runJob(baseFor(reader)+'/analyze',{sentence:chosen.quote,paragraph:chosen.paragraph},job=>{
-    if(sheet!==state.sheet)return;
-    if(job.state!=='done'){output.append(el('p',{class:'error'},job.error||'未能完成讲解'));return;}
-    renderAnalysis(output,job.result,chosen.quote,{bookId:reader.bookId,index:reader.index,paragraph:chosen.paragraph});
-  },job=>{if(sheet===state.sheet&&job.state!=='done'){$('p.muted',output).textContent=job.status;}});
+  const sheet=showSheet('句子讲解',output,{reader,paragraph:chosen.paragraph,status:'正在准备句子讲解…'});
+  const failure=message=>{if(sheet!==state.sheet)return;output.replaceChildren(el('p',{class:'quote'},chosen.quote),el('p',{class:'error'},message));finishSheetWait(sheet);};
+  try {
+    await runJob(baseFor(reader)+'/analyze',{sentence:chosen.quote,paragraph:chosen.paragraph},job=>{
+      if(sheet!==state.sheet)return;
+      if(job.state!=='done'){failure(job.error||'未能完成讲解');return;}
+      renderAnalysis(output,job.result,chosen.quote,{bookId:reader.bookId,index:reader.index,paragraph:chosen.paragraph});
+      finishSheetWait(sheet);
+    },job=>{if(sheet===state.sheet&&job.state!=='done'){$('p.muted',output).textContent=job.status;updateSheetWait(sheet,job.status);}},
+      ()=>failure('连接中断，服务器仍会保存结果。可稍后重新打开句子讲解。'));
+  }catch(error){failure(error.message);}
 }
 function renderAnalysis(output,data,sentence,source=null) {
   output.replaceChildren(el('div',{class:'analysis-sentence'},sentence));
@@ -927,6 +1038,7 @@ function renderAnalysis(output,data,sentence,source=null) {
 
 async function discussionSheet(reader,selection=null) {
   const data=await api(baseFor(reader)+'/discussion');
+  if(state.reader!==reader)return;
   const messages=el('div',{class:'discussion-list'}),status=el('span',{class:'muted'});
   const messageNode=(m)=>el('div',{class:'message '+m.role},el('small',{},m.role==='user'?'你':'刊读 AI'),
     m.quote?el('p',{class:'quote'},m.quote):null,el('div',{},m.content|| (m.status==='pending'?'等待回答…':'回答未完成')),m.error?el('p',{class:'error'},m.error):null);
@@ -945,18 +1057,23 @@ async function discussionSheet(reader,selection=null) {
     const user=messageNode({role:'user',content:question,quote:selection?.quote});
     const answer=el('div',{class:'message assistant'},el('small',{},'刊读 AI'),el('div',{class:'answer-text'},'等待回答…'));
     messages.append(user,answer);messages.scrollTop=messages.scrollHeight;
+    waitForSheet(sheet,reader,selection?.paragraph,'正在提交问题…');
+    const failure=message=>{if(sheet!==state.sheet)return;stop.hidden=true;submit.disabled=false;status.textContent=message;finishSheetWait(sheet);};
     try {
       jobId=await runJob(baseFor(reader)+'/discussion',{question,quote:selection?.quote||'',paragraph:selection?.paragraph},async job=>{
+        if(sheet!==state.sheet)return;
         stop.hidden=true;submit.disabled=false;
         if(job.state==='error'){$('.answer-text',answer).textContent=job.text||job.error;status.textContent='回答未完成，可重新提问';}
         else status.textContent=job.state==='stopped'?'已停止，已收到的内容已保存':'会话已保存';
+        finishSheetWait(sheet);
       },job=>{
         if(sheet!==state.sheet)return;
         status.textContent=job.status;
+        updateSheetWait(sheet,job.status);
         if(job.text){$('.answer-text',answer).textContent=job.text;messages.scrollTop=messages.scrollHeight;}
-      });
+      },()=>failure('连接中断，服务器仍会保存会话，请稍后重新打开。'));
       input.value='';stop.hidden=false;
-    }catch(error){user.remove();answer.remove();submit.disabled=false;throw error;}
+    }catch(error){user.remove();answer.remove();submit.disabled=false;failure(error.message);}
   });
   input.onkeydown=event=>{if(event.ctrlKey&&event.key==='Enter'){event.preventDefault();form.requestSubmit();}};
 }
@@ -986,7 +1103,7 @@ async function editWord(word='') {
   if(word)form.append(sourceNode(initial.source));
   form.append(el('button',{type:'submit',class:'primary'},'保存词条'));
   form.onsubmit=action(async event=>{event.preventDefault();const data=Object.fromEntries(Object.entries(fields).map(([k,v])=>[k,v.value]));
-    if(word)data.original=word;await api('/wordbook',{method:'POST',data});$('#sheet').close();toast('词条已保存');
+    if(word)data.original=word;await api('/wordbook',{method:'POST',data});closeSheet();toast('词条已保存');
     if(state.reader)await loadVocab(state.reader);else if(location.hash==='#/wordbook')route();});
   showSheet(word?'编辑个人词条':'添加个人词条',form);
 }
@@ -1097,13 +1214,13 @@ function editModel(initial) {
   const form=el('form',{class:'form-stack'},el('label',{},'配置名称',name),el('label',{},'接口类型',provider),
     el('label',{},'API 地址',baseUrl),el('label',{},'模型名称',model),el('label',{},'API Key',key),
     el('small',{class:'muted'},'原密钥不会回传到页面。留空保留，填写新密钥则替换。'),error,
-    el('div',{class:'row'},submit,button('取消',()=>$('#sheet').close())));
+    el('div',{class:'row'},submit,button('取消',()=>closeSheet())));
   form.onsubmit=async event=>{
     event.preventDefault();submit.disabled=true;error.hidden=true;
     try {
       await api('/settings',{method:'POST',data:{originalName:initial.name,modelConfig:{name:name.value,
         provider:provider.value,baseUrl:baseUrl.value,model:model.value,apiKey:key.value}}});
-      key.value='';$('#sheet').close();toast('模型配置已更新');await route();
+      key.value='';closeSheet();toast('模型配置已更新');await route();
     } catch(failure) {error.textContent=failure.message;error.hidden=false;}
     finally {submit.disabled=false;}
   };
@@ -1121,7 +1238,7 @@ async function route() {
     window.visualViewport?.removeEventListener('scroll',state.reader.selectionResize);}
   clearTimeout(progressTimer);cancelAnimationFrame(progressFrame);progressFrame=null;if(readerScroll)window.removeEventListener('scroll',readerScroll);readerScroll=null;
   state.reader=null;state.selection=null;
-  if($('#sheet').open)$('#sheet').close();
+  closeSheet();
   const token=++state.route;$('#navigation').hidden=false;
   const [path,query='']=(location.hash.slice(1)||'/library').split('?');
   const parts=path.split('/').filter(Boolean).map(decodeURIComponent);
