@@ -1,5 +1,6 @@
 """Cached vocabulary hover: real pointer geometry, lifecycle and reading clock."""
 import os
+from pathlib import Path
 import threading
 from unittest.mock import patch
 from wsgiref.simple_server import make_server
@@ -79,6 +80,36 @@ def main():
                 page.locator('#password').fill(WebTests.authcode); page.locator('#login-form button').click()
                 expect(page.locator('#badge-0')).to_contain_text('6')
                 page.evaluate("document.documentElement.style.scrollBehavior='auto'")
+                toggle=page.locator('#vocab-highlight-toggle')
+                expect(toggle).to_have_attribute('aria-pressed','true')
+                highlights=lambda:page.evaluate("[...(CSS.highlights.get('kandu-vocabulary')||[])].map(r=>r.toString())")
+                assert {'candid','charted','paper over','uncertainties','stopped','studied','charts','chart'} <= set(highlights()), highlights()
+                assert 'speaker' not in highlights() and 'candidly' not in highlights()
+                assert page.locator('#para-0 p').text_content()==paragraphs[0]
+                # Painting ranges adds no inline elements and never changes wrapping or selection.
+                assert page.locator('#para-0 p > *').count()==0
+                hover_word(page,'candid',wait=False);page.mouse.move(1,1)
+                geometry=page.locator('#para-0 p').bounding_box()
+                position=snapshot(page)
+                page.evaluate('''() => {
+                    const p=document.querySelector('#para-0 p'),r=document.createRange();
+                    r.setStart(p.firstChild,2);r.setEnd(p.firstChild,8);
+                    getSelection().removeAllRanges();getSelection().addRange(r);
+                    document.querySelector('#vocab-highlight-toggle').click();
+                }''')
+                assert page.evaluate('getSelection().toString()')=='candid'
+                assert highlights()==[]
+                assert page.locator('#para-0 p').bounding_box()==geometry
+                assert snapshot(page)==position
+                page.evaluate('getSelection().removeAllRanges()')
+                page.reload()
+                expect(page.locator('#badge-0')).to_contain_text('6')
+                page.evaluate("document.documentElement.style.scrollBehavior='auto'")
+                expect(toggle).to_have_attribute('aria-pressed','false')
+                assert highlights()==[]
+                toggle.click()
+                expect(toggle).to_have_attribute('aria-pressed','true')
+                assert 'paper over' in highlights()
                 tip = page.locator('#vocab-hover')
                 request_start = len(requests)
                 point = hover_word(page, 'candid', wait=False)
@@ -106,6 +137,9 @@ def main():
                 page.mouse.move(1, 1)
                 expect(tip).not_to_be_visible()
                 expect(page.locator('#reader-reading-time')).to_contain_text('计时中')
+                if folder:=os.environ.get('KANDU_TEST_ARTIFACTS'):
+                    target=Path(folder);target.mkdir(parents=True,exist_ok=True)
+                    page.screenshot(path=str(target/f'vocabulary-highlights-{width}.png'))
 
                 for word, meaning in [('charted', 'To plan a path'), ('uncertainties', 'A lack of certainty'),
                                       ('stopped', 'To cease'), ('studied', 'To learn'), ('over', 'To conceal a problem')]:
@@ -133,6 +167,7 @@ def main():
                 page.get_by_role('button', name='查找', exact=True).click()
                 page.get_by_label('查找原文').fill('and')
                 assert page.locator('#para-0 mark').count() > 0
+                assert page.evaluate("[...CSS.highlights.get('kandu-vocabulary')].every(r=>!r.startContainer.parentElement.closest('mark'))")
                 hover_word(page, 'candid')
                 expect(tip.locator('.hover-sense')).to_have_text(entry['sense'])
                 page.evaluate('''() => {
@@ -152,6 +187,10 @@ def main():
                 expect(page.locator('#reader-reading-time')).to_contain_text('已暂停')
                 page.locator('#reading-time-toggle').click()
 
+                page.get_by_label('查找原文').fill('')
+                assert 'candid' in highlights() and 'paper over' in highlights()
+                assert page.locator('#para-0 p > *').count()==0
+
                 # Existing vocabulary is the only source; hovering does not fetch or collect words.
                 assert not [url for method, url in requests[request_start:] if
                     any(s in url for s in ['/vocab', '/lookup', '/collect', '/generate-', '/wordbook'])], requests[request_start:]
@@ -167,6 +206,7 @@ def main():
                 page.locator('#sheet-close').click()
                 hover_word(page, 'candid')
                 expect(tip.locator('.hover-sense')).to_have_text('Updated saved meaning')
+                assert 'candid' in highlights()
                 vocab['paragraphs'][0]['entries'][0]['sense'] = entry['sense'] = 'Frank in this paragraph <em>literal</em>'
                 store.save_vocab('sample', vocab)
 
@@ -177,6 +217,7 @@ def main():
                 hover_word(page, 'candid', wait=False)
                 page.evaluate("location.hash='#/read/sample/1'")
                 expect(page.locator('.reader-head h1')).to_have_text('Another article')
+                assert highlights()==[]
                 page.wait_for_timeout(1150)
                 expect(page.locator('#vocab-hover')).not_to_be_visible()
                 hover_word(page, 'candid', wait=False); page.wait_for_timeout(1150)
@@ -184,7 +225,7 @@ def main():
                 context.close()
             assert not errors, errors
             browser.close()
-        print('VOCAB HOVER PASS: desktop/narrow viewport, 1s dwell, nearby tooltip, cached paragraph/phrase/inflection matching, search marks, timing, cleanup, no model/lookup/collection requests')
+        print('VOCAB HOVER/HIGHLIGHT PASS: desktop/narrow viewport, persisted highlight toggle, unchanged text/layout/selection/progress, phrase/inflection ranges, search priority, 1s hover, timing, cleanup, no model/lookup/collection requests')
     finally:
         server.shutdown(); server.server_close(); thread.join(timeout=5)
         WebTests.tearDownClass()

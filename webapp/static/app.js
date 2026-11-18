@@ -531,11 +531,43 @@ function indexVocabHover(reader) {
         const score=(local?1000:0)+words.length*10+(form===tokens[i].word?1:0);
         for(let j=0;j<words.length;j++)if(!tokens[i+j].entry||score>tokens[i+j].score) {
           tokens[i+j].entry=entry;tokens[i+j].score=score;
+          tokens[i+j].highlightStart=tokens[i].start;tokens[i+j].highlightEnd=tokens[i+words.length-1].end;
         }
       }
     }
     reader.hoverWords.set(paragraph,tokens);
   }
+}
+function supportsVocabHighlights() { return Boolean(window.CSS?.highlights&&typeof Highlight==='function'); }
+function updateVocabHighlights(reader) {
+  if(!supportsVocabHighlights())return;
+  const highlight=new Highlight();
+  if(reader.vocabHighlightEnabled)for(let paragraph=0;paragraph<reader.paragraphNodes.length;paragraph++) {
+    const p=$('p',reader.paragraphNodes[paragraph]),spans=[];
+    // Merge repeated phrase spans so the spaces in "paper over" share one tint.
+    const matches=(reader.hoverWords?.get(paragraph)||[]).filter(t=>t.entry)
+      .map(t=>({start:t.highlightStart,end:t.highlightEnd})).sort((a,b)=>a.start-b.start);
+    for(const match of matches) {
+      const previous=spans.at(-1);
+      if(previous&&match.start<=previous.end)previous.end=Math.max(previous.end,match.end);
+      else spans.push(match);
+    }
+    if(!spans.length)continue;
+    const walker=document.createTreeWalker(p,NodeFilter.SHOW_TEXT);let node,offset=0,first=0;
+    while((node=walker.nextNode())) {
+      const end=offset+node.length;
+      while(first<spans.length&&spans[first].end<=offset)first++;
+      // Search results keep their distinct gold background, even within a word.
+      if(!node.parentElement.closest('mark'))for(let i=first;i<spans.length&&spans[i].start<end;i++) {
+        const start=Math.max(offset,spans[i].start),stop=Math.min(end,spans[i].end);
+        if(stop<=start)continue;
+        const range=document.createRange();range.setStart(node,start-offset);range.setEnd(node,stop-offset);highlight.add(range);
+      }
+      offset=end;
+    }
+  }
+  if(highlight.size)CSS.highlights.set('kandu-vocabulary',highlight);
+  else CSS.highlights.delete('kandu-vocabulary');
 }
 function vocabHoverRange(p,start,end) {
   const range=document.createRange(),walker=document.createTreeWalker(p,NodeFilter.SHOW_TEXT);
@@ -558,7 +590,7 @@ function installVocabHover(reader,article) {
     if(!reader.hoverVisible)return;
     readingClockTick(reader);reader.hoverVisible=false;tip.hidden=true;readingClockTick(reader);
   };
-  reader.hoverCleanup=()=>{reader.hoverHide();controller.abort();tip.remove();};
+  reader.hoverCleanup=()=>{reader.hoverHide();controller.abort();tip.remove();window.CSS?.highlights?.delete('kandu-vocabulary');};
   const blocked=()=>state.reader!==reader||$('#sheet').open||document.hidden||!document.hasFocus()||!getSelection()?.isCollapsed;
   article.addEventListener('pointermove',event=>{
     if(event.pointerType!=='mouse'||event.buttons||blocked()){reader.hoverHide();return;}
@@ -624,7 +656,8 @@ function positionSelectionBar(reader) {
 }
 async function readerPage(bookId,index,token,startParagraph=null) {
   const data=await api(`/books/${encodeURIComponent(bookId)}/articles/${index}`);if(token!==state.route)return;
-  const reader={...data,bookId,index,ready:false,vocab:null,fontSize:Number(localStorage.getItem('kandu-font')||21)};state.reader=reader;
+  const reader={...data,bookId,index,ready:false,vocab:null,fontSize:Number(localStorage.getItem('kandu-font')||21),
+    vocabHighlightEnabled:localStorage.getItem('kandu-vocab-highlight')!=='off'};state.reader=reader;
   reader.paragraphOffsets=[];reader.totalCharacters=0;
   for(const paragraph of data.article.paragraphs){reader.paragraphOffsets.push(reader.totalCharacters);reader.totalCharacters+=paragraph.length;}
   const article=el('article',{class:'reader'});
@@ -642,13 +675,21 @@ async function readerPage(bookId,index,token,startParagraph=null) {
     reader.clock.lastInteraction=performance.now();pauseTimer.textContent=reader.clock.manualPaused?'继续计时':'暂停计时';
     readingClockTick(reader);flushReadingClock(reader);
   });pauseTimer.id='reading-time-toggle';
+  const highlightToggle=button('生词标记',()=>{
+    reader.vocabHighlightEnabled=!reader.vocabHighlightEnabled;
+    localStorage.setItem('kandu-vocab-highlight',reader.vocabHighlightEnabled?'on':'off');
+    highlightToggle.setAttribute('aria-pressed',String(reader.vocabHighlightEnabled));updateVocabHighlights(reader);
+  },'vocab-highlight-toggle');
+  highlightToggle.id='vocab-highlight-toggle';highlightToggle.hidden=!supportsVocabHighlights();
+  highlightToggle.setAttribute('aria-pressed',String(reader.vocabHighlightEnabled));
+  highlightToggle.title='用浅绿色背景标出本文词表中的生词和短语，可随时关闭；不额外生成词表。';
   const tools=el('div',{class:'reader-toolbar'},el('a',{href:`#/book/${encodeURIComponent(data.parentBookId||bookId)}`},'← 目录'),vocabButton,
     button(data.state==='read'?'已读 ✓':'标记已读',action(async event=>{
       const target=event.target.closest('button');target.disabled=true;
       try{await api(`/books/${encodeURIComponent(bookId)}/state`,{method:'POST',data:{articleIndex:index,state:'read'}});
         reader.state='read';target.textContent='已读 ✓';toast('已计入全局已读统计');}finally{target.disabled=false;}
     })),
-    button('与 AI 讨论',action(()=>discussionSheet(reader))),button('查找',()=>{findRow.hidden=!findRow.hidden;if(!findRow.hidden)find.focus();}),pauseTimer,
+    button('与 AI 讨论',action(()=>discussionSheet(reader))),button('查找',()=>{findRow.hidden=!findRow.hidden;if(!findRow.hidden)find.focus();}),highlightToggle,pauseTimer,
     el('span',{class:'grow'}),button('A−',()=>resizeReader(reader,-1)),button('A+',()=>resizeReader(reader,1)),
     el('a',{href:`/api/books/${encodeURIComponent(bookId)}/file`,target:'_blank',rel:'noopener'},data.ext==='pdf'?'原版 PDF ↗':'下载 EPUB ↗'),progress);
   const selection=el('div',{class:'selection-tools',id:'selection-tools',hidden:true,role:'toolbar','aria-label':'选中文字操作',
@@ -716,11 +757,13 @@ function findArticle(reader,query) {
     while(index>=0){p.append(text.slice(cursor,index),el('mark',{},text.slice(index,index+needle.length)));cursor=index+needle.length;count++;index=lower.indexOf(needle,cursor);}
     p.append(text.slice(cursor));
   });$('#find-count').textContent=query?`${count} 处匹配`:'';
+  updateVocabHighlights(reader);
 }
 async function loadVocab(reader) {
   const response=await api(baseFor(reader)+'/vocab');if(state.reader!==reader)return;
   reader.vocab=response;
   indexVocabHover(reader);
+  updateVocabHighlights(reader);
   const count=response.vocab.titleEntries.length+response.vocab.paragraphs.reduce((n,p)=>n+p.entries.length,0);
   $('#vocab-button').textContent=!response.generated?'生成生词表':response.missing.length?`补缺生词表 · ${response.missing.length} 段`:`生词表 ${count}`;
   for(let i=0;i<reader.article.paragraphs.length;i++) {
