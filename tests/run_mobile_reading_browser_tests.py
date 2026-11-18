@@ -80,6 +80,17 @@ def main():
                 expect(page.locator('#touch-reading-help')).to_contain_text('轻点单词')
                 assert page.locator('#reader-body').evaluate("n=>getComputedStyle(n.querySelector('p')).userSelect")!='none'
                 assert page.locator('.reader-toolbar').bounding_box()['height']<=145
+                timer=page.locator('#reading-time-toggle')
+                expect(timer).to_be_visible()
+                assert timer.bounding_box()['height']>=44
+                before=snapshot(page)
+                timer_bounds=timer.bounding_box()
+                page.touchscreen.tap(timer_bounds['x']+timer_bounds['width']/2,timer_bounds['y']+timer_bounds['height']/2)
+                expect(page.get_by_role('button',name='继续计时',exact=True)).to_have_attribute('aria-pressed','true')
+                expect(page.locator('#reader-reading-time')).to_contain_text('已暂停')
+                assert snapshot(page)==before,(width,height,'pause',before,snapshot(page))
+                page.get_by_role('button',name='继续计时',exact=True).tap()
+                expect(timer).to_have_attribute('aria-pressed','false')
                 # Extra controls do not permanently consume reading space or change its position.
                 rect=page.locator('#reader-more-toggle').bounding_box()
                 page.touchscreen.tap(rect['x']+rect['width']/2,rect['y']+rect['height']/2)

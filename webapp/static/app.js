@@ -916,8 +916,11 @@ async function readerPage(bookId,index,token,startParagraph=null) {
   const pauseTimer=button('暂停计时',()=>{
     readingClockTick(reader);reader.clock.manualPaused=!reader.clock.manualPaused;
     reader.clock.lastInteraction=performance.now();pauseTimer.textContent=reader.clock.manualPaused?'继续计时':'暂停计时';
+    pauseTimer.setAttribute('aria-pressed',String(reader.clock.manualPaused));
     readingClockTick(reader);flushReadingClock(reader);
-  });pauseTimer.id='reading-time-toggle';
+  });pauseTimer.id='reading-time-toggle';pauseTimer.setAttribute('aria-pressed','false');
+  pauseTimer.title='暂停期间不累计阅读时间；点击继续计时后恢复。';
+  progress.insertBefore(pauseTimer,progress.lastElementChild);
   const highlightToggle=button('生词标记',()=>{
     reader.vocabHighlightEnabled=!reader.vocabHighlightEnabled;
     localStorage.setItem('kandu-vocab-highlight',reader.vocabHighlightEnabled?'on':'off');
@@ -939,7 +942,7 @@ async function readerPage(bookId,index,token,startParagraph=null) {
       try{await api(`/books/${encodeURIComponent(bookId)}/state`,{method:'POST',data:{articleIndex:index,state:'read'}});
         reader.state='read';target.textContent='已读 ✓';toast('已计入全局已读统计');}finally{target.disabled=false;}
     })),
-    button('查找',()=>{findRow.hidden=!findRow.hidden;if(!findRow.hidden){tools.classList.remove('options-open');more.setAttribute('aria-expanded','false');find.focus();}}),highlightToggle,pauseTimer,pointToggle,
+    button('查找',()=>{findRow.hidden=!findRow.hidden;if(!findRow.hidden){tools.classList.remove('options-open');more.setAttribute('aria-expanded','false');find.focus();}}),highlightToggle,pointToggle,
     el('span',{class:'grow'}),button('A−',()=>resizeReader(reader,-1)),button('A+',()=>resizeReader(reader,1)),
     el('a',{href:`/api/books/${encodeURIComponent(bookId)}/file`,target:'_blank',rel:'noopener'},data.ext==='pdf'?'原版 PDF ↗':'下载 EPUB ↗')),
     progress);

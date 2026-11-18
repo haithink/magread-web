@@ -131,6 +131,10 @@ def main():
                     page.goto(base+'/#/read/sample/0')
                     page.locator('#password').fill(WebTests.authcode);page.locator('#login-form button').click()
                     expect(page.locator('#reader-reading-time')).to_contain_text('计时中')
+                    timer=page.locator('#reading-time-toggle')
+                    expect(timer).to_be_visible()
+                    expect(timer).to_have_attribute('aria-pressed','false')
+                    assert page.locator('#reader-options #reading-time-toggle').count()==0
                     page.wait_for_function('() => state.reader?.clock?.lastSaved')
                     before=activity.article_timing('sample',0)['activeMs']
                     def lose_first_reply(route):
@@ -153,6 +157,7 @@ def main():
                     assert page.evaluate('() => state.reader.clock.serverMs')==activity.article_timing('sample',0)['activeMs']
                     reader_button(page,'暂停计时').click()
                     expect(page.locator('#reader-reading-time')).to_contain_text('已暂停')
+                    expect(timer).to_have_attribute('aria-pressed','true')
                     page.wait_for_function('() => !state.reader.clock.sending')
                     paused=activity.article_timing('sample',0)['activeMs']
                     assert paused>before,(paused,before)
@@ -160,6 +165,7 @@ def main():
                     page.wait_for_function('() => !state.reader.clock.sending')
                     assert activity.article_timing('sample',0)['activeMs']==paused
                     reader_button(page,'继续计时').click()
+                    expect(page.locator('#reading-time-toggle')).to_have_attribute('aria-pressed','false')
                     check_vocabulary_waits(page,now)
                     # Headless Chromium keeps all pages foreground. Emulate the
                     # platform visibility/focus change, leaving clock code intact.
