@@ -15,18 +15,21 @@
 ## ECDICT 精简词典
 
 - 文件：`kandu/assets/ecdict_compact.tsv.zip`，包含 `ecdict_compact.tsv`。
-- 上游项目：https://github.com/skywind3000/ECDICT
-- 当前上游 MIT 许可证：https://github.com/skywind3000/ECDICT/blob/master/LICENSE
+- 来源：`skywind3000/ECDICT` 的 `ecdict.csv`，固定提交 `39cfb9672c0906b63569e0453c2e6abfb9ab182a`。
+- 固定版本：https://github.com/skywind3000/ECDICT/tree/39cfb9672c0906b63569e0453c2e6abfb9ab182a
+- 该版本的 MIT 许可证：https://github.com/skywind3000/ECDICT/blob/39cfb9672c0906b63569e0453c2e6abfb9ab182a/LICENSE
 - 已随附上游许可证原文：[LICENSES/ECDICT-MIT.txt](LICENSES/ECDICT-MIT.txt)。
-- 本地代码将该资源标记为 ECDICT 精简版，但未记录导出时的上游版本或提交。
-  公开分发前应补齐该版本信息，并核对适用于原始数据的许可声明。
+- 保留源词条的 `word`、`pos`、`phonetic`、`translation`、`exchange` 五个字段；词头去首尾空白、转小写，同词头保留最后一条值并按首次出现顺序导出 UTF-8 TSV，保持离线查词的大小写兼容。字段内真实制表符和换行替换为空格。
+- 来源和产物 SHA-256、行数及处理规则见 `kandu/assets/dictionary_sources.json`；ZIP 时间戳固定，可重复构建。
+- 复现：`python tools/build_dictionary_assets.py <固定版本的ecdict.csv>`。
 
 ## CET-4 词表
 
 - 文件：`kandu/assets/cet4_words.txt`。
-- 内容：CET-4 单词及音标，与 Android 版、Chrome 版使用的词表相同。
-- 当前仓库未记录原始来源、版本或许可证，不能据此认定该资源已获得 AGPL 授权。
-  公开分发该词表前，需要核实来源和再分发条款，或替换为来源与许可明确的词表。
+- 已替换旧版来源不明的内置词表，来源与上述 ECDICT 固定版本相同，采用该版本的 MIT 许可证。
+- 只选 `tag` 字段包含独立 `cet4` 标签的词条，词头去首尾空白、转小写、去重、排序，保留该版本提供的音标。
+- 这是 ECDICT 的考试分级，不宣称为官方四级考试完整大纲；来源、词数和产物 SHA-256 见 `kandu/assets/dictionary_sources.json`，与精简词典使用同一脚本复现。
+- 只替换随源码分发的资源，不覆盖已安装用户在仓库外保存的词表；用户已有词表继续与基础补充表取并集。
 
 ## 基础至 CET-4 的已知词补充表
 
@@ -44,3 +47,5 @@
 `requirements.txt` 中的 Flask、Waitress、Requests、BeautifulSoup、Pillow 等依赖，
 以及 Python、SQLite 等组件，按各自的上游许可证使用。Web 版不需要桌面 GUI 或 PyInstaller。
 分发应用时应保留所包含第三方组件要求的版权、许可证及声明。
+
+以上说明记录项目实际采用的上游版本、许可证和转换规则，不为上游每个历史数据来源作额外授权承诺。旧 Git 提交仍可能包含已替换资源；公开整个仓库前也应检查历史，不能只检查当前文件。

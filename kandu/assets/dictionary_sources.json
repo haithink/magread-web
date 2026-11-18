@@ -1,0 +1,33 @@
+{
+  "project": "skywind3000/ECDICT",
+  "commit": "39cfb9672c0906b63569e0453c2e6abfb9ab182a",
+  "source": "https://raw.githubusercontent.com/skywind3000/ECDICT/39cfb9672c0906b63569e0453c2e6abfb9ab182a/ecdict.csv",
+  "sourceSha256": "d1ecbdf9ee2b920afb6f430ca6b6bb9f559588cf0dff86e04bd255f9390843cc",
+  "sourceRows": 770611,
+  "license": "MIT",
+  "licenseFile": "LICENSES/ECDICT-MIT.txt",
+  "licenseSha256": "f8552dd246f61a4e064569eae6194a01c6b3d63b03bf27c6ca863593c549ed0f",
+  "licenseSource": "https://raw.githubusercontent.com/skywind3000/ECDICT/39cfb9672c0906b63569e0453c2e6abfb9ab182a/LICENSE",
+  "dictionary": {
+    "file": "ecdict_compact.tsv.zip",
+    "member": "ecdict_compact.tsv",
+    "fields": [
+      "word",
+      "pos",
+      "phonetic",
+      "translation",
+      "exchange"
+    ],
+    "rows": 770611,
+    "sha256": "cbafef412d9dd5086353ed9234848ca668f33b0b43a53aa8be5b739786486a95",
+    "memberSha256": "e4a68db5d124c8f3342278c9a3ed92f6335b1e276f443774c9566bff2e901312",
+    "transform": "Trim and lowercase headwords; keep last duplicate value in first-occurrence order; replace literal tabs, CR and LF with spaces; UTF-8, LF."
+  },
+  "cet4": {
+    "file": "cet4_words.txt",
+    "tag": "cet4",
+    "wordCount": 3849,
+    "sha256": "c5b4927cd204dadcdfef043e8ebf2424b37d832e55d1c4b5078057bdf3adcfa8",
+    "transform": "Select cet4 tag; trim and lowercase words; deduplicate and sort; trim phonetics; word plus optional TAB phonetic, LF."
+  }
+}

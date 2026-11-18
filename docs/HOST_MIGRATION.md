@@ -1,6 +1,6 @@
 # 同域名迁移到另一台 Windows 电脑
 
-适用于已有刊读 Web 和本地管理的 Cloudflare Tunnel，需要将服务从旧电脑 A 切换到新电脑 B 的情况。以 `read.example.com` 为例；其他部署替换为自己的域名。
+适用于已有刊读 Web 和本地管理的 Cloudflare Tunnel，需要将服务从旧电脑 A 切换到新电脑 B 的情况。以 `read.example.com` 为例；部署时替换为自己的域名。
 
 域名的 DNS 记录仍指向原隧道，新电脑使用同一隧道的凭据连接即可。Cloudflare 上已有的 HTTP 转 HTTPS 规则也继续保留，无须重新创建隧道、修改 DNS 或购买服务器。
 

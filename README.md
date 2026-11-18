@@ -239,6 +239,7 @@ python tests/run_podcast_tests.py
 python tests/run_word_meaning_tests.py
 python tests/run_phrase_tests.py
 python tests/run_privacy_tests.py
+python tests/run_dictionary_assets_tests.py
 python -m playwright install chromium
 python tests/run_web_browser_tests.py
 python tests/run_access_upload_browser_tests.py
@@ -264,4 +265,6 @@ run_web.py       独立服务入口
 
 核心源码提取自 `haithink/magread-desktop` 的 `288f2de`，保留版权归属；新仓库不复制旧仓库历史或个人运行数据。变更见 [CHANGELOG.md](CHANGELOG.md)。
 
-采用 [AGPL-3.0-only](LICENSE)。第三方资源保留各自声明，见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)；其中原 CET-4 词表来源及精简词典的上游版本仍待核实，本次拆分保留这些已知说明。
+采用 [AGPL-3.0-only](LICENSE)。第三方资源保留各自声明，见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。内置精简词典与 CET-4 词表从固定版本的 MIT 许可 ECDICT 数据导出，来源、校验值和规则记录在 `kandu/assets/dictionary_sources.json`；使用 `python tools/build_dictionary_assets.py <ecdict.csv>` 可离线复现，不覆盖用户已有词表。
+
+将仓库从私有改为公开前，参阅 [源码公开检查说明](docs/PUBLISHING.md)，同时检查 Git 历史和 GitHub 日志、附件。
