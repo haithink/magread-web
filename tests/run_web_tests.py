@@ -91,6 +91,23 @@ class WebTests(unittest.TestCase):
         self.assertNotIn('SOURCE_SECRET', self.client.get('/api/library').text)
         self.assertEqual(self.client.get('/api/session').headers['X-Content-Type-Options'], 'nosniff')
 
+    def test_article_tags_validate_persist_clear_and_preserve_reading_and_generated_data(self):
+        endpoint='/books/sample/articles/0/tags'
+        self.assertEqual(self.app.test_client().post('/api'+endpoint, json={'tags':['AI 精选']}).status_code,401)
+        self.assertEqual(self.client.post('/api'+endpoint, json={'tags':['AI 精选']}).status_code,403)
+        files=[config.app_dir()/name for name in ['books.json','cache/sample/content.json','cache/sample/digest.json']]
+        before={p:p.read_bytes() for p in files}
+        self.assertEqual(self.post(endpoint, {'tags':['  AI   精选  ','AI 精选','LLM','llm']}).json['tags'], ['AI 精选','LLM'])
+        self.assertEqual(self.client.get('/api/books/sample').json['articles'][0]['tags'], ['AI 精选','LLM'])
+        saved=(config.app_dir()/'article_tags/sample.json').read_bytes()
+        for tags in [None,'AI',{},[None],[''],['x'*25],list(map(str,range(9)))]:
+            self.assertEqual(self.post(endpoint, {'tags':tags}).status_code,400)
+            self.assertEqual((config.app_dir()/'article_tags/sample.json').read_bytes(),saved)
+        self.assertEqual(self.post('/books/sample/articles/999/tags', {'tags':['AI']}).status_code,404)
+        self.assertEqual({p:p.read_bytes() for p in files},before)
+        self.assertEqual(self.post(endpoint, {'tags':[]}).json['tags'], [])
+        self.assertEqual(self.client.get('/api/books/sample').json['articles'][0]['tags'], [])
+
     def test_https_host_secure_cookie_without_breaking_local_login(self):
         app = create_app(https_hosts=['READ.EXAMPLE.COM'])
         try:

@@ -26,6 +26,7 @@ from webapp import reading_stats
 from webapp import reading_activity
 from webapp import word_meaning
 from webapp import article_duplicates
+from webapp import article_tags
 from webapp import podcasts
 from webapp import podcast_covers
 from webapp import podcast_library
@@ -537,8 +538,10 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare
         duplicates = article_duplicates.earlier_occurrences(meta, content['articles'])
         summaries = {a['index']: a for a in (store.load_digest(book_id) or {}).get('articles', [])}
         states, history = store.load_article_states(book_id), store.load_reading_history(book_id)
+        tags = article_tags.load(book_id)
         items = [dict(index=a['index'], titleEn=a['title'], titleZh=summaries.get(a['index'], {}).get('titleZh', ''),
             summaryZh=summaries.get(a['index'], {}).get('summaryZh', ''),
+            tags=tags.get(str(a['index']), []),
             state=states.get(str(a['index']), 'unread'), history=history.get(str(a['index'])),
             earlierOccurrence=duplicates.get(a['index'])) for a in content['articles']]
         digest = store.load_digest(book_id) or {}
@@ -546,6 +549,14 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare
                        title=meta.get('title', ''), sourceUrl=meta.get('sourceUrl', ''),
                        sourceType=meta.get('sourceType', ''), excerpted=bool(digest.get('excerpted')),
                        duplicateCount=len(duplicates))
+
+    @app.post('/api/books/<book_id>/articles/<int:index>/tags')
+    def save_tags(book_id, index):
+        meta, art = article(book_id, index)
+        tags = payload().get('tags')
+        with data_lock:
+            saved = article_tags.save(meta['id'], art['index'], tags)
+        return jsonify(tags=saved)
 
     @app.post('/api/books/<book_id>/state')
     def mark(book_id):

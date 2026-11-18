@@ -69,9 +69,12 @@ class PrivacyTests(unittest.TestCase):
             (root / 'settings.json').write_text('{}')
             (root / 'sample.py').write_text('value = ' + repr(fake))
             (root / '.env').write_text('DEMO=fixture')
+            (root / 'article_tags').mkdir()
+            (root / 'article_tags/sample.json').write_text('{"0":["fixture"]}')
             _, issues = find_issues(root)
             self.assertTrue(any(name == 'settings.json' for name, _ in issues))
             self.assertTrue(any(name == '.env' for name, _ in issues))
+            self.assertTrue(any(name == 'article_tags/sample.json' for name, _ in issues))
             self.assertTrue(any(reason == 'API token pattern' for _, reason in issues))
             self.assertNotIn(fake, str(issues))
 

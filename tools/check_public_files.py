@@ -8,7 +8,7 @@ import zipfile
 
 SKIP_DIRS = {'.git', '.venv', 'venv', '__pycache__', '.pytest_cache', '.idea', '.vscode'}
 PRIVATE_DIRS = {'data', 'runtime', 'kanduweb', 'kanduwebruntime', 'cache', 'covers',
-                'books', 'uploads', 'reading_history', 'article_states', 'discussions', 'vocab'}
+                'books', 'uploads', 'reading_history', 'article_states', 'article_tags', 'discussions', 'vocab'}
 PRIVATE_NAMES = {'settings.json', 'books.json', 'web-auth.json', 'access-code.txt',
                  'config-auth.json',
                  'reading-stats.json', 'reading-sync-auth.json',

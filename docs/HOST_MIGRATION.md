@@ -71,7 +71,7 @@ Get-NetTCPConnection -LocalPort 8766 -State Listen -ErrorAction SilentlyContinue
 | 隧道配置 | `%LOCALAPPDATA%\KanduWebRuntime\cloudflared\config.yml` | 复制并修正凭据路径 |
 | 此隧道的凭据 JSON | `config.yml` 中 `credentials-file` 指向的文件，通常在 `%USERPROFILE%\.cloudflared\` | 私下复制到新机，再更新配置路径 |
 
-`KanduWeb` 包含 `books.json`、`settings.json`、`web-auth.json`、`access-code.txt`、缓存、封面、生词本 SQLite 数据库、阅读进度、文章标记和讨论等；`reading-stats.json` 保存已读清单，`reading-activity.sqlite3` 保存有效阅读耗时及每日曲线数据。应复制整个目录，不要只选摘要或数据库；数据库存在配套的 journal/WAL 文件时也保留在完整快照中。
+`KanduWeb` 包含 `books.json`、`settings.json`、`web-auth.json`、`access-code.txt`、缓存、封面、生词本 SQLite 数据库、阅读进度、文章标记和讨论等；`article_tags` 目录保存文章与播客的主题标签，`reading-stats.json` 保存已读清单，`reading-activity.sqlite3` 保存有效阅读耗时及每日曲线数据。应复制整个目录，不要只选摘要或数据库；数据库存在配套的 journal/WAL 文件时也保留在完整快照中。
 
 另外保留 `config-auth.json`（模型配置独立密码哈希）、`config-access.sqlite3`（临时解锁及验证限流）和 `upload-quota.sqlite3`（全站当日上传量及预留额度）。独立密码不保存在 `access-code.txt`；忘记时在服务器运行 `tools/set_config_password.py` 重新设置，旧解锁随即失效。每日 500 MB 额度按新机的本地日期计算，迁移时检查系统日期、时区正确。
 

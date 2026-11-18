@@ -2,7 +2,7 @@
 from pathlib import Path
 
 from kandu import core_parsers as store
-from webapp import podcasts
+from webapp import podcasts, article_tags
 
 
 PREFIX = 'podcast-series-'
@@ -51,6 +51,7 @@ def directory(meta):
             summaryZh=summary.get('summaryZh', ''), episodeNumber=episode.get('episodeNumber', 0),
             publishedAt=episode.get('publishedAt', ''), guest=episode.get('guest', ''),
             sourceUrl=episode.get('sourceUrl', ''),
+            tags=article_tags.load(episode['id']).get('0', []),
             state=store.load_article_states(episode['id']).get('0', 'unread'),
             history=store.load_reading_history(episode['id']).get('0'), earlierOccurrence=None))
     return items

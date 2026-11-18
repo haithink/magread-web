@@ -22,6 +22,7 @@ books/
 uploads/
 reading_history/
 article_states/
+article_tags/
 discussions/
 vocab/
 _test_artifacts/

@@ -217,6 +217,7 @@ class PodcastTests(unittest.TestCase):
         bid = result['books'][1]
         sid = podcast_library.PREFIX+'lex-fridman'
         self.post('/books/'+bid+'/state', dict(articleIndex=0, state='read'))
+        self.assertEqual(self.post('/books/'+bid+'/articles/0/tags', dict(tags=['AI 精选','AI 产业'])).status_code,200)
         self.post('/books/'+bid+'/articles/0/progress', dict(paragraphIndex=3, paragraphOffset=4))
         before = self.client.get('/api/books/'+sid).json
         old = next(a for a in before['articles'] if a['bookId'] == bid)
@@ -232,6 +233,8 @@ class PodcastTests(unittest.TestCase):
         self.assertEqual(same['articleIndex'], old['articleIndex'])
         self.assertEqual(same['summaryZh'], old['summaryZh'])
         self.assertEqual(same['state'], 'read')
+        self.assertEqual(same['tags'], ['AI 精选','AI 产业'])
+        self.assertEqual(self.client.get('/api/books/'+bid).json['articles'][0]['tags'], same['tags'])
         self.assertEqual(same['history']['paragraphIndex'], 3)
         self.assertEqual(same['history']['paragraphOffset'], 4)
         read = self.client.get('/api/books/'+bid+'/articles/0').json
