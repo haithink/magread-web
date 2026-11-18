@@ -17,6 +17,8 @@ def main():
         bookSize=WebTests.meta['size'],format='epub',articles=[article]))
     store.save_vocab('sample',dict(articleIndex=0,level='cet4',titleEntries=[],idioms=[],
         processedParagraphs=list(range(18)),paragraphs=[dict(index=i,entries=[dict(word='candid',sense='坦率的')]) for i in range(18)]))
+    from PIL import Image
+    Image.new('RGB',(32,48),'navy').save(store.cover_file('sample'))
     server=make_server('127.0.0.1',0,WebTests.app,server_class=BrowserServer)
     thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
     errors=[]
@@ -34,6 +36,30 @@ def main():
                 base=f'http://127.0.0.1:{server.server_port}'
                 page.goto(base+'/#/library');page.locator('#password').fill(WebTests.authcode);page.locator('#login-form button').click()
                 expect(page.locator('.book-card')).to_have_count(1)
+                page.wait_for_function('async() => !!await ReadingCache.get("cover:sample")')
+                page.wait_for_function('() => document.querySelector(".cover-link img").naturalWidth===32')
+                covers=[]
+                page.on('request',lambda request:covers.append(request.url) if request.url.endswith('/cover') else None)
+                page.evaluate('staleReadingCache()')
+                page.reload();expect(page.locator('.book-card')).to_have_count(1)
+                page.wait_for_function('() => document.querySelector(".cover-link img").naturalWidth===32')
+                assert not covers,'Persisted covers must render without another request'
+                # An expired cover remains visible and validates via ETag; a
+                # 304 must preserve its saved image rather than save an empty body.
+                page.evaluate('''async()=>{
+                    const row=await ReadingCache.get('cover:sample');
+                    await ReadingCache.put('cover:sample',row.value,{...row,checked:Date.now()-3600_001});
+                }''')
+                validators=[]
+                def unchanged_cover(route):
+                    validators.append(route.request.headers.get('if-none-match'))
+                    route.continue_()
+                page.route('**/api/books/sample/cover',unchanged_cover)
+                page.reload();expect(page.locator('.book-card')).to_have_count(1)
+                page.wait_for_function('() => document.querySelector(".cover-link img").naturalWidth===32')
+                page.wait_for_function('async() => (await ReadingCache.get("cover:sample")).checked>Date.now()-30_000')
+                assert len(validators)==1 and validators[0],validators
+                page.unroute('**/api/books/sample/cover')
                 page.goto(base+'/#/book/sample');expect(page.locator('.article-card')).to_have_count(1)
                 page.goto(base+'/#/read/sample/0');expect(page.locator('#vocab-button')).to_have_text('生词表 1')
                 page.wait_for_function('() => ReadingSync.pending()===0')
@@ -83,6 +109,8 @@ def main():
                 # Offline navigation works within the loaded application, including
                 # paragraphs and progress; no general writes are silently queued.
                 context.set_offline(True)
+                page.evaluate("location.hash='#/library'");expect(page.locator('.book-card')).to_have_count(1)
+                page.wait_for_function('() => document.querySelector(".cover-link img").naturalWidth===32')
                 page.evaluate("location.hash='#/book/sample'");expect(page.locator('.article-card')).to_have_count(1)
                 page.evaluate("location.hash='#/read/sample/0'");expect(page.locator('#vocab-button')).to_have_text('生词表 1')
                 page.locator('#para-7').scroll_into_view_if_needed();page.wait_for_timeout(1000)
@@ -153,7 +181,7 @@ def main():
                 fallback.close()
             browser.close()
         assert not errors,errors
-        print('READING CACHE PASS: warm reads, zero repeated vocabulary GETs, nonblocking saves, background change notice, offline navigation, durable replay, analysis reuse, LRU/50MB, private settings and logout; no real models.')
+        print('READING CACHE PASS: persistent/offline covers, cover ETag validation, warm reads, zero repeated vocabulary GETs, nonblocking saves, background change notice, offline navigation, durable replay, analysis reuse, LRU/50MB, private settings and logout; no real models.')
     finally:
         server.shutdown();server.server_close();thread.join(timeout=5);WebTests.tearDownClass()
 

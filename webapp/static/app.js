@@ -86,6 +86,9 @@ async function cachedRead(path,{fresh=false,onUpdate}={}){
         const value=response.unchanged?record?.value:response.value;if(!value)return null;
         if(epoch!==cacheEpoch||!state.csrf)return value;
         await ReadingCache.put(path,value,{etag:response.etag||record?.etag,group:articleGroup(path)});
+        if(epoch===cacheEpoch&&state.reader&&baseFor(state.reader)===path&&state.reader.state!==value.state){
+          setReaderState(state.reader,value.state);
+        }
         if(record&&token===state.route&&cacheComparable(path,record.value)!==cacheComparable(path,value)){
           if(onUpdate)onUpdate(value);else cacheNotice('服务器有更新，刷新后查看；当前阅读位置保持不变。');
         }
@@ -104,7 +107,51 @@ async function cachedRead(path,{fresh=false,onUpdate}={}){
 }
 async function staleReadingCache(){
   cacheEpoch++;cacheRequests.clear();
-  await ReadingCache.stale();
+  await ReadingCache.stale(key=>!key.startsWith('cover:'));
+}
+// Covers share the reading cache budget and logout cleanup. An image is fetched
+// only near the viewport; a saved data URL also works during offline navigation.
+const coverRequests=new Map();
+function cachedCover(book){
+  const img=el('img',{alt:book.title||book.fileName,loading:'lazy',decoding:'async'});
+  const path=`/api/books/${encodeURIComponent(book.id)}/cover`,key='cover:'+book.id,epoch=cacheEpoch,flight=epoch+':'+key;
+  async function load(){
+    const record=await ReadingCache.get(key);
+    if(epoch!==cacheEpoch||!state.csrf)return;
+    if(record)img.src=record.value;
+    if(navigator.onLine===false||record&&Date.now()-record.checked<3600_000)return;
+    try{
+      if(!coverRequests.has(flight)){
+        const pending=(async()=>{
+          const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),20_000);
+          try{
+            const response=await fetch(path,{credentials:'same-origin',signal:controller.signal,
+              headers:record?.etag?{'If-None-Match':record.etag}:{}});
+            let value=record?.value;
+            if(response.status!==304){
+              if(!response.ok)return null;
+              const blob=await response.blob();
+              if(!blob.type.startsWith('image/')||blob.size>5*1024*1024)return null;
+              value=await new Promise((resolve,reject)=>{const file=new FileReader();file.onload=()=>resolve(file.result);file.onerror=()=>reject(file.error);file.readAsDataURL(blob);});
+            }
+            if(value&&epoch===cacheEpoch&&state.csrf)await ReadingCache.put(key,value,{etag:response.headers.get('ETag')||record?.etag});
+            return value;
+          }finally{clearTimeout(timer);}
+        })().finally(()=>{if(coverRequests.get(flight)===pending)coverRequests.delete(flight);});
+        coverRequests.set(flight,pending);
+      }
+      const value=await coverRequests.get(flight);
+      if(value&&epoch===cacheEpoch&&state.csrf)img.src=value;
+    }catch{} // Keep a saved cover when a weak connection fails.
+  }
+  // One observer per render avoids retaining detached book cards after filtering.
+  queueMicrotask(()=>{
+    if(!img.isConnected)return;
+    if(!('IntersectionObserver' in window)){load();return;}
+    const observer=new IntersectionObserver(entries=>{if(entries.some(entry=>entry.isIntersecting)){observer.disconnect();load();}},{rootMargin:'300px'});
+    observer.observe(img);img.coverObserver=observer;
+  });
+  return img;
 }
 async function api(path,options={}){
   if((options.method||'GET')==='GET'&&cacheable(path))return cachedRead(path,options);
@@ -414,14 +461,14 @@ async function library(token) {
     const q=search.value.trim().toLowerCase();
     const filtered=data.books.filter(b=>(b.fileName+' '+(b.title||'')).toLowerCase().includes(q)&&(!select.value||b.publication===select.value));
     const groups=new Map(); filtered.forEach(b=>{if(!groups.has(b.publication))groups.set(b.publication,[]);groups.get(b.publication).push(b);});
-    result.replaceChildren();
+    result.querySelectorAll('img').forEach(img=>img.coverObserver?.disconnect());result.replaceChildren();
     if(!filtered.length) result.append(empty(data.books.length?'没有匹配的刊物':'从一本刊物开始','添加 EPUB 或 PDF，已有摘要和词表会自动复用。'));
     for(const [name,books] of groups) {
       books.sort((a,b)=>a.sourceType==='podcast'&&b.sourceType==='podcast'?b.episodeNumber-a.episodeNumber:b.fileName.localeCompare(a.fileName,undefined,{numeric:true}));
       const grid=el('div',{class:'book-grid'});
       for(const book of books) {
         const isPodcast=book.sourceType==='podcast'||book.sourceType==='podcast-series';
-        const cover=book.cover?el('img',{src:`/api/books/${encodeURIComponent(book.id)}/cover`,alt:book.title||book.fileName,loading:'lazy'}):isPodcast?
+        const cover=book.cover?cachedCover(book):isPodcast?
           el('span',{class:'podcast-cover'},el('small',{},name.replace(/ Podcast$/i,'').toUpperCase()),el('strong',{},'#'+book.episodeNumber),el('span',{},'PODCAST'),el('small',{},book.publishedAt||'TRANSCRIPT')):el('span',{class:'cover-placeholder'},name);
         const articleCount=book.articleCountKnown?`${book.articleCount} 篇文章`:'待解析文章';
         const unreadCount=book.articleCountKnown?`未读 ${book.unreadCount} 篇`:null;
@@ -706,6 +753,8 @@ function pauseVocabularyGeneration(path) {
   };
 }
 function readingClockReason(reader,now=performance.now()) {
+  if(reader.state==='read')return '已读停计时';
+  if(reader.markingRead)return '正在标记已读';
   if(reader.clock.manualPaused)return '已暂停';
   if(document.hidden)return '后台暂停';
   if(!document.hasFocus())return '失焦暂停';
@@ -714,6 +763,15 @@ function readingClockReason(reader,now=performance.now()) {
   if(reader.hoverVisible)return '词义提示暂停';
   if(now-reader.clock.lastInteraction>90_000)return '无操作暂停';
   return '计时中';
+}
+function setReaderState(reader,value){
+  readingClockTick(reader);reader.state=value;readingClockTick(reader);
+  if(state.reader!==reader)return;
+  const timer=$('#reading-time-toggle'),read=value==='read';
+  if(timer){timer.disabled=read;timer.textContent=read?'已读停计时':reader.clock?.manualPaused?'继续计时':'暂停计时';
+    timer.setAttribute('aria-pressed',String(read||!!reader.clock?.manualPaused));}
+  const mark=$('#reader-mark-read');if(mark)mark.textContent=read?'已读 ✓':'标记已读';
+  if(read)flushReadingClock(reader);
 }
 function readingClockTick(reader=state.reader) {
   if(!reader?.clock||reader.clock.stopped)return;
@@ -759,6 +817,7 @@ function startReadingClock(reader,initialPosition) {
   clock.interval=setInterval(()=>{readingClockTick(reader);if(++clock.ticks%15===0)flushReadingClock(reader);},1000);
   clock.ticks=0;
   flushReadingClock(reader,false,initialPosition);readingClockTick(reader);
+  setReaderState(reader,reader.state);
 }
 function stopReadingClock(reader,save=true) {
   if(!reader?.clock)return Promise.resolve();
@@ -1092,6 +1151,7 @@ async function readerPage(bookId,index,token,startParagraph=null) {
   const find=el('input',{type:'search',placeholder:'在本文中查找…','aria-label':'查找原文'});
   const findRow=el('div',{class:'find-row',hidden:true},find,el('span',{class:'count',id:'find-count'}),button('×',()=>{find.value='';findArticle(reader,'');findRow.hidden=true;}));
   const pauseTimer=button('暂停计时',()=>{
+    if(reader.state==='read'||reader.markingRead)return;
     readingClockTick(reader);reader.clock.manualPaused=!reader.clock.manualPaused;
     reader.clock.lastInteraction=performance.now();pauseTimer.textContent=reader.clock.manualPaused?'继续计时':'暂停计时';
     pauseTimer.setAttribute('aria-pressed',String(reader.clock.manualPaused));
@@ -1115,11 +1175,15 @@ async function readerPage(bookId,index,token,startParagraph=null) {
     el('a',{href:`#/book/${encodeURIComponent(data.parentBookId||bookId)}`},'← 目录'),vocabButton,
     button('与 AI 讨论',action(()=>discussionSheet(reader))),more),
     el('div',{class:'reader-options',id:'reader-options'},
-    button(data.state==='read'?'已读 ✓':'标记已读',action(async event=>{
+    el('button',{type:'button',id:'reader-mark-read',onclick:action(async event=>{
       const target=event.target.closest('button');target.disabled=true;
+      readingClockTick(reader);reader.markingRead=true;readingClockTick(reader);flushReadingClock(reader);
       try{await api(`/books/${encodeURIComponent(bookId)}/state`,{method:'POST',data:{articleIndex:index,state:'read'}});
-        reader.state='read';target.textContent='已读 ✓';toast('已计入全局已读统计');}finally{target.disabled=false;}
-    })),
+        setReaderState(reader,'read');
+        const cached=await ReadingCache.get(path);
+        if(cached)await ReadingCache.put(path,{...cached.value,state:'read'},{...cached,checked:0});
+        toast('已计入全局已读统计');}finally{reader.markingRead=false;readingClockTick(reader);target.disabled=false;}
+    })},data.state==='read'?'已读 ✓':'标记已读'),
     button('查找',()=>{findRow.hidden=!findRow.hidden;if(!findRow.hidden){tools.classList.remove('options-open');more.setAttribute('aria-expanded','false');find.focus();}}),highlightToggle,pointToggle,
     el('span',{class:'grow'}),button('A−',()=>resizeReader(reader,-1)),button('A+',()=>resizeReader(reader,1)),
     el('a',{href:`/api/books/${encodeURIComponent(bookId)}/file`,target:'_blank',rel:'noopener'},data.ext==='pdf'?'原版 PDF ↗':'下载 EPUB ↗')),
@@ -1592,6 +1656,7 @@ function editModel(initial) {
 
 async function route({refresh=false}={}) {
   clearTimeout(toastTimer);$('#toast').hidden=true;
+  view.querySelectorAll('img').forEach(img=>img.coverObserver?.disconnect());
   state.reader?.touchCleanup?.();
   state.reader?.hoverCleanup?.();
   clearTimeout(state.settingsTimer);

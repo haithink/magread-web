@@ -206,7 +206,39 @@ def main():
                     idle=activity.article_timing('sample',0)['activeMs']
                     now[0]+=30_000;page.clock.run_for(30_000)
                     assert activity.article_timing('sample',0)['activeMs']==idle
+                    # A failed mark resumes timing; a successful slow mark stops
+                    # at the click, including while its HTTP reply is pending.
+                    page.route('**/api/books/sample/state',lambda route:route.fulfill(status=503,json={'error':'模拟标记失败'}))
                     reader_button(page,'标记已读').click()
+                    expect(page.locator('#toast')).to_contain_text('模拟标记失败')
+                    page.unroute('**/api/books/sample/state')
+                    page.locator('#reader-reading-time').click()
+                    now[0]+=1000;page.clock.run_for(1000)
+                    expect(page.locator('#reader-reading-time')).to_contain_text('计时中')
+                    held=[]
+                    page.route('**/api/books/sample/state',lambda route:held.append(route))
+                    reader_button(page,'标记已读').click()
+                    expect(page.locator('#reader-reading-time')).to_contain_text('正在标记已读')
+                    elapsed=page.evaluate('state.reader.clock.elapsedMs')
+                    now[0]+=10_000;page.clock.run_for(10_000)
+                    assert page.evaluate('state.reader.clock.elapsedMs')==elapsed
+                    assert len(held)==1
+                    held.pop().continue_()
+                    expect(page.locator('#reader-reading-time')).to_contain_text('已读停计时')
+                    page.unroute('**/api/books/sample/state')
+                    expect(timer).to_be_disabled()
+                    page.wait_for_function('() => ReadingSync.pending()===0')
+                    completed=activity.article_timing('sample',0)['activeMs']
+                    now[0]+=30_000;page.clock.run_for(30_000)
+                    page.locator('#para-4').scroll_into_view_if_needed()
+                    assert page.evaluate('state.reader.clock.elapsedMs')==elapsed
+                    assert activity.article_timing('sample',0)['activeMs']==completed
+                    page.reload()
+                    expect(page.locator('#reader-reading-time')).to_contain_text('已读停计时')
+                    expect(page.locator('#reading-time-toggle')).to_be_disabled()
+                    now[0]+=30_000;page.clock.run_for(30_000)
+                    page.wait_for_function('() => ReadingSync.pending()===0')
+                    assert activity.article_timing('sample',0)['activeMs']==completed
                     page.get_by_role('link',name='已读统计',exact=True).click()
                     expect(page.get_by_role('heading',name='已读统计',exact=True)).to_be_visible()
                     expect(page.locator('.reading-chart')).to_have_count(2)
