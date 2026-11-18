@@ -1062,42 +1062,75 @@ function vocabHoverRange(p,start,end) {
   return null;
 }
 function installVocabHover(reader,article) {
-  const tip=el('aside',{id:'vocab-hover',class:'vocab-hover',role:'tooltip',hidden:true});
+  const tip=el('aside',{id:'vocab-hover',class:'vocab-hover',role:'dialog','aria-label':'生词释义',hidden:true});
   article.append(tip);
   const controller=new AbortController(),options={signal:controller.signal,passive:true};
-  let timer=null,hover=null;
+  let timer=null,hideTimer=null,hover=null;
+  const cancelHide=()=>{clearTimeout(hideTimer);hideTimer=null;};
+  const insideTip=event=>event.target instanceof Node&&tip.contains(event.target);
   reader.hoverHide=()=>{
-    clearTimeout(timer);timer=null;hover=null;
+    clearTimeout(timer);cancelHide();timer=null;hover=null;
     if(!reader.hoverVisible)return;
     readingClockTick(reader);reader.hoverVisible=false;tip.hidden=true;readingClockTick(reader);
+  };
+  const deferHide=()=>{
+    if(!reader.hoverVisible){reader.hoverHide();return;}
+    if(hideTimer)return;
+    // Leave enough time to cross the small gap between the word and its card.
+    hideTimer=setTimeout(()=>{hideTimer=null;
+      const keyboardFocus=tip.contains(document.activeElement)&&document.activeElement.matches(':focus-visible');
+      if(!tip.matches(':hover')&&!keyboardFocus)reader.hoverHide();
+    },250);
   };
   reader.hoverCleanup=()=>{reader.hoverHide();controller.abort();tip.remove();window.CSS?.highlights?.delete('kandu-vocabulary');};
   const blocked=()=>state.reader!==reader||$('#sheet').open||document.hidden||!document.hasFocus()||!getSelection()?.isCollapsed;
   article.addEventListener('pointermove',event=>{
     if(event.pointerType!=='mouse'||event.buttons||blocked()){reader.hoverHide();return;}
+    if(insideTip(event)){cancelHide();return;}
     const p=event.target.closest('.paragraph p, .reader-head h1');
-    if(!p){reader.hoverHide();return;}
+    if(!p){deferHide();return;}
     const caret=document.caretPositionFromPoint?.(event.clientX,event.clientY);
     const fallback=caret?null:document.caretRangeFromPoint?.(event.clientX,event.clientY);
     const node=caret?.offsetNode||fallback?.startContainer,offset=caret?.offset??fallback?.startOffset;
-    if(!node||!p.contains(node)){reader.hoverHide();return;}
+    if(!node||!p.contains(node)){deferHide();return;}
     const prefix=document.createRange();prefix.selectNodeContents(p);prefix.setEnd(node,offset);
     const at=prefix.toString().length,paragraph=Number(p.closest('.paragraph')?.dataset.index??-1);
     const token=reader.hoverWords?.get(paragraph)?.find(t=>t.entry&&at>=t.start&&at<=t.end);
     const range=token&&vocabHoverRange(p,token.start,token.end);
     const rect=range&&[...range.getClientRects()].find(r=>event.clientX>=r.left&&event.clientX<=r.right&&event.clientY>=r.top&&event.clientY<=r.bottom);
-    if(!rect){reader.hoverHide();return;}
+    if(!rect){deferHide();return;}
+    cancelHide();
     if(hover?.token===token&&hover.p===p)return;
     reader.hoverHide();hover={token,p};
     timer=setTimeout(()=>{
       if(blocked()||!p.isConnected){reader.hoverHide();return;}
       const entry=token.entry;
+      const collect=button(entry.inWordbook?'已在生词本 ✓':'＋ 加入生词本',action(async()=>{
+        if(collect.disabled)return;
+        collect.disabled=true;collect.textContent='正在加入…';
+        try{
+          const saved=await collectVocabEntry(entry,{bookId:reader.bookId,index:reader.index,paragraph});
+          collect.textContent='已加入生词本 ✓';
+          if(state.reader===reader){
+            const spellings=new Set([saved.word,...saved.aliases].map(w=>w.toLowerCase().replaceAll('’',"'").trim()));
+            for(const item of [...reader.vocab.vocab.titleEntries,...reader.vocab.vocab.paragraphs.flatMap(p=>p.entries)]){
+              if(spellings.has((item.wordbookWord||item.word).toLowerCase().replaceAll('’',"'").trim())){
+                item.inWordbook=true;item.wordbookWord=saved.word;
+              }
+            }
+            await ReadingCache.put(baseFor(reader)+'/vocab',reader.vocab,{group:baseFor(reader),checked:0});
+          }
+          toast('已加入个人生词本');
+        }catch(error){collect.disabled=false;collect.textContent='重试加入生词本';throw error;}
+      }),'hover-collect');
+      collect.disabled=!!entry.inWordbook;
       tip.replaceChildren(el('div',{class:'hover-heading'},el('strong',{},entry.word),el('span',{},[
         entry.phonetic?'/'+entry.phonetic.replaceAll('/','')+'/':'',entry.pos||''].filter(Boolean).join('  '))),
         el('p',{class:'hover-sense'},entry.sense||'暂无释义'),
         entry.inText?el('p',{class:'hover-context'},entry.inText):null,
         entry.root?el('p',{class:'hover-detail'},'词根 / 词源 · '+entry.root):null,
         entry.note?el('p',{class:'hover-detail'},'笔记 · '+entry.note):null,
+        el('div',{class:'hover-actions'},collect),
         el('small',{},'本文生词表 · 完整内容可点「本段生词」'));
       const {left,top,width,height}=readingViewport(),margin=10;
       tip.style.maxWidth=Math.max(0,width-2*margin)+'px';tip.style.maxHeight=Math.max(0,height-2*margin)+'px';
@@ -1109,9 +1142,17 @@ function installVocabHover(reader,article) {
       readingClockTick(reader);reader.hoverVisible=true;readingClockTick(reader);
     },1000);
   },options);
-  article.addEventListener('pointerleave',reader.hoverHide,options);
-  for(const event of ['pointerdown','keydown','wheel','scroll','blur','resize','pagehide'])
-    window.addEventListener(event,reader.hoverHide,{...options,capture:true});
+  tip.addEventListener('pointerenter',cancelHide,options);
+  tip.addEventListener('pointerleave',deferHide,options);
+  tip.addEventListener('focusin',cancelHide,options);
+  tip.addEventListener('focusout',deferHide,options);
+  article.addEventListener('pointerleave',deferHide,options);
+  for(const type of ['pointerdown','keydown','wheel','scroll'])window.addEventListener(type,event=>{
+    if(insideTip(event)&&!(type==='keydown'&&event.key==='Escape'))return;
+    reader.hoverHide();
+  },{...options,capture:true});
+  for(const event of ['blur','resize','pagehide'])
+    window.addEventListener(event,reader.hoverHide,options);
   document.addEventListener('visibilitychange',reader.hoverHide,options);
   window.visualViewport?.addEventListener('resize',reader.hoverHide,options);
   window.visualViewport?.addEventListener('scroll',reader.hoverHide,options);
@@ -1318,16 +1359,21 @@ function sourceNode(source) {
 function entryNode(entry,onSave,source=null) {
   const collect=button(entry.inWordbook?'编辑收藏':'＋ 加入生词本',action(async()=>{
     if(entry.inWordbook){await editWord(entry.wordbookWord||entry.word);return;}
-    const value={...entry,word:entry.wordbookWord||entry.word};
-    if(source)await api(`/books/${encodeURIComponent(source.bookId)}/articles/${source.index}/collect`,{method:'POST',data:{entry:value,paragraph:source.paragraph}});
-    else await api('/wordbook',{method:'POST',data:value});
-    entry.inWordbook=true;collect.textContent='编辑收藏';toast('已加入个人生词本');if(onSave)await onSave();
+    await collectVocabEntry(entry,source);
+    collect.textContent='编辑收藏';toast('已加入个人生词本');if(onSave)await onSave();
   }));
   return el('div',{class:'vocab-entry'},el('div',{class:'entry-top'},el('div',{},el('span',{class:'vocab-word'},entry.word),
       el('span',{class:'phonetic'},[entry.phonetic?'/'+entry.phonetic.replaceAll('/','')+'/':'',entry.pos||''].filter(Boolean).join('  '))),collect),
     entry.senseSource==='wordbook'?el('small',{class:'muted'},'个人收藏释义'):entry.senseSource==='dictionary'?el('small',{class:'muted'},'本地词典释义 · 可补充本文含义'):entry.senseSource==='phrase_rule'?el('small',{class:'muted'},'本地短语提示 · 可补充本文含义'):null,
     el('p',{class:'entry-sense'},entry.sense||''),entry.inText?el('p',{class:'quote'},entry.inText):null,
     entry.root?el('p',{class:'entry-root'},entry.root):null,entry.note?el('p',{class:'entry-root'},'笔记 · '+entry.note):null);
+}
+async function collectVocabEntry(entry,source=null){
+  const value={...entry,word:entry.wordbookWord||entry.word};
+  const result=source?await api(`/books/${encodeURIComponent(source.bookId)}/articles/${source.index}/collect`,
+    {method:'POST',data:{entry:value,paragraph:source.paragraph}}):await api('/wordbook',{method:'POST',data:value});
+  entry.inWordbook=true;entry.wordbookWord=result.word.word;
+  return result.word;
 }
 async function openVocab(paragraph) {
   const reader=state.reader;if(!reader)return;

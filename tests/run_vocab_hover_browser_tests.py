@@ -29,6 +29,7 @@ def word_point(page, word, paragraph=0, scroll=True):
 
 def hover_word(page, word, paragraph=0, wait=True):
     page.mouse.move(1, 1)
+    expect(page.locator('#vocab-hover')).not_to_be_visible()
     point = word_point(page, word, paragraph)
     page.wait_for_timeout(80)  # Finish scroll events before starting the dwell.
     point = word_point(page, word, paragraph, scroll=False)
@@ -41,6 +42,83 @@ def hover_word(page, word, paragraph=0, wait=True):
 def snapshot(page):
     return page.evaluate('''() => ({y:scrollY,progress:document.querySelector('#reader-progress-bar').value,
         paragraph:document.querySelector('#reader-paragraph').textContent})''')
+
+
+def check_hover_collection(page, article, entry):
+    """Click the real card, including a failed save, retry and in-flight double click."""
+    page.evaluate("location.hash='#/read/sample/0'")
+    expect(page.locator('#badge-0')).to_contain_text('6')
+    page.evaluate('loadVocab(state.reader,{fresh:true})')
+    hover_word(page,'candid')
+    tip=page.locator('#vocab-hover')
+    collect=tip.get_by_role('button',name='＋ 加入生词本',exact=True)
+    expect(collect).to_be_enabled()
+    before=snapshot(page)
+    # Move through the gap into the card and keep the pointer there long enough
+    # to catch accidental close timers before clicking.
+    collect.hover()
+    page.wait_for_timeout(400)
+    expect(tip).to_be_visible()
+    held=[]
+    def hold(route):
+        held.append(route)
+    page.route('**/collect',hold)
+    collect.click()
+    pending=tip.get_by_role('button',name='正在加入…',exact=True)
+    expect(pending).to_be_disabled()
+    expect(tip).to_be_visible()
+    assert len(held)==1
+    held.pop().fulfill(status=503,json={'error':'模拟收藏失败'})
+    retry=tip.get_by_role('button',name='重试加入生词本',exact=True)
+    expect(retry).to_be_enabled()
+    assert not wordbook.get('candid')
+    retry.click()
+    expect(pending).to_be_disabled()
+    box=pending.bounding_box()
+    page.mouse.click(box['x']+box['width']/2,box['y']+box['height']/2)
+    assert len(held)==1,'A repeated click must not send another collection request'
+    held.pop().continue_()
+    expect(tip.get_by_role('button',name='已加入生词本 ✓',exact=True)).to_be_disabled()
+    page.unroute('**/collect',hold)
+    record=wordbook.get('candid')
+    for field in ['sense','phonetic','root','note']:
+        assert record[field]==entry[field],(field,record)
+    assert record['source']['bookId']=='sample' and record['source']['articleIndex']==0
+    assert record['source']['paragraph']==0 and record['source']['context']==article['paragraphs'][0]
+    assert snapshot(page)==before,'Collecting must not move the article or reading position'
+    assert page.locator('#para-0 p').text_content()==article['paragraphs'][0]
+    hover_word(page,'candid',1)
+    expect(tip.get_by_role('button',name='已在生词本 ✓',exact=True)).to_be_disabled()
+    hover_word(page,'candid',-1)
+    expect(tip.get_by_role('button',name='已在生词本 ✓',exact=True)).to_be_disabled()
+    # Reloading preserves the collection state in the cached and server vocab.
+    page.reload()
+    expect(page.locator('#badge-0')).to_contain_text('6')
+    hover_word(page,'candid')
+    expect(tip.get_by_role('button',name='已在生词本 ✓',exact=True)).to_be_disabled()
+    # This chart occurrence uses a fallback from paragraph 0; the source must be
+    # the actually hovered paragraph 2. A concurrent personal edit must survive.
+    hover_word(page,'chart',2)
+    wordbook.save(dict(word='chart',sense='My edited definition',note='Keep my note'))
+    collect=tip.get_by_role('button',name='＋ 加入生词本',exact=True)
+    collect.focus()
+    page.keyboard.press('Enter')
+    expect(tip.get_by_role('button',name='已加入生词本 ✓',exact=True)).to_be_disabled()
+    record=wordbook.get('chart')
+    assert record['source']['paragraph']==2 and record['source']['context']==article['paragraphs'][2]
+    assert record['sense']=='My edited definition' and record['note']=='Keep my note'
+    hover_word(page,'over')
+    tip.get_by_role('button',name='＋ 加入生词本',exact=True).click()
+    expect(tip.get_by_role('button',name='已加入生词本 ✓',exact=True)).to_be_disabled()
+    record=wordbook.get('paper over')
+    assert record['sense']=='To conceal a problem' and record['source']['paragraph']==0
+    page.keyboard.press('Escape')
+    expect(tip).not_to_be_visible()
+    # The saved words must also appear in the standalone notebook.
+    page.get_by_role('link',name='生词本',exact=True).click()
+    expect(page.get_by_role('heading',name='个人生词本',exact=True)).to_be_visible()
+    expect(page.locator('.vocab-word')).to_have_count(3)
+    expect(page.locator('.wordbook-list')).to_contain_text('paper over')
 
 
 def main():
@@ -74,6 +152,8 @@ def main():
             chrome = os.environ.get('KANDU_TEST_CHROME')
             browser = playwright.chromium.launch(headless=True, **({'executable_path':chrome} if chrome else {}))
             for width in [1440, 390]:
+                for record in wordbook.list_words():
+                    wordbook.delete(record['word'])
                 context = browser.new_context(viewport=dict(width=width, height=900))
                 page = context.new_page(); page.on('pageerror', lambda error:errors.append(str(error)))
                 page.on('request', lambda request: requests.append((request.method, request.url)))
@@ -204,6 +284,9 @@ def main():
                 page.locator('#badge-0').click()
                 expect(page.locator('#sheet')).to_be_visible()
                 expect(tip).not_to_be_visible()
+                # The normal reader reuses vocabulary for 30 seconds; request
+                # an explicit refresh so this assertion is independent of test speed.
+                page.evaluate('loadVocab(state.reader,{fresh:true})')
                 page.locator('#sheet-close').click()
                 hover_word(page, 'candid')
                 expect(tip.locator('.hover-sense')).to_have_text('Updated saved meaning')
@@ -223,10 +306,11 @@ def main():
                 expect(page.locator('#vocab-hover')).not_to_be_visible()
                 hover_word(page, 'candid', wait=False); page.wait_for_timeout(1150)
                 expect(page.locator('#vocab-hover')).not_to_be_visible()
+                check_hover_collection(page,article,entry)
                 context.close()
             assert not errors, errors
             browser.close()
-        print('VOCAB HOVER/HIGHLIGHT PASS: desktop/narrow viewport, persisted highlight toggle, unchanged text/layout/selection/progress, phrase/inflection ranges, search priority, 1s hover, timing, cleanup, no model/lookup/collection requests')
+        print('VOCAB HOVER/HIGHLIGHT PASS: desktop/narrow viewport, hover card collection/retry/double-click guard, saved status, keyboard save, actual paragraph source, personal edits, phrase/notebook integration, highlights, unchanged position, lifecycle/timing; passive hover makes no model/lookup/collection requests')
     finally:
         server.shutdown(); server.server_close(); thread.join(timeout=5)
         WebTests.tearDownClass()
