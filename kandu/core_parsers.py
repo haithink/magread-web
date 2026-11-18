@@ -370,6 +370,9 @@ def _ensure_content(meta):
     cf = _cache_dir(meta["id"]) / "content.json"
     cache = _json_read(cf)
     if _content_current(meta, cache):
+        if meta['ext'] == 'pdf' and cache.get('pdfParagraphVersion') != core_pdf.PARAGRAPH_VERSION:
+            from . import core_pdf_migration
+            cache = core_pdf_migration.upgrade(meta, cache)
         return {
             "bookId": meta["id"],
             "format": cache["format"],
@@ -384,6 +387,7 @@ def _ensure_content(meta):
     payload = {"bookSize": meta["size"], "format": fmt, "articles": articles}
     if fmt == "pdf":
         payload["pdfParserVersion"] = PDF_PARSER_VERSION
+        payload["pdfParagraphVersion"] = core_pdf.PARAGRAPH_VERSION
         if cache and cache.get("pdfParserVersion") != PDF_PARSER_VERSION:
             _migrate_pdf_cache(meta, cache, articles)
     _atomic_json_write(cf, payload)
