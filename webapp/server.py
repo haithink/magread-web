@@ -459,9 +459,11 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare
         limit = data.get('limit', spec['limit'])
         if type(limit) is not int or not 1 <= limit <= spec['limit']:
             abort(400, '导入期数应为 1 至 50 的整数')
+        transcript_urls = podcasts.validate_selection(spec, data.get('transcriptUrls'))
         cfg = model(data)
         def work(update, control):
-            return podcasts.import_source(source_id, limit, cfg, update, control, data_lock, lock_for)
+            return podcasts.import_source(source_id, limit, cfg, update, control, data_lock, lock_for,
+                transcript_urls=transcript_urls)
         with data_lock:
             job_id = jobs.submit(('podcast', source_id), work)
             podcast_jobs[source_id] = job_id

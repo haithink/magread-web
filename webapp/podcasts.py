@@ -244,10 +244,30 @@ def generate_digest(meta, cfg, update, control):
                 raise ValueError('本期摘要未生成，Transcript 已保留，可再次补缺或切换模型') from None
 
 
-def import_source(source_id, limit, cfg, update, control, data_lock=None, lock_for=None):
+def validate_selection(spec, urls):
+    """A bounded selection of official transcripts, verified against the catalog at import."""
+    if urls is None:
+        return None
+    if not isinstance(urls, list) or not 1 <= len(urls) <= spec['limit']:
+        raise ValueError('指定节目应为 1 至 50 个 Transcript 地址')
+    selected = []
+    for url in urls:
+        if not isinstance(url, str):
+            raise ValueError('Transcript 地址必须是文本')
+        url = checked_url(spec, url).rstrip('/')
+        if not url.endswith('-transcript') or url in selected:
+            raise ValueError('Transcript 地址无效或重复')
+        selected.append(url)
+    return selected
+
+
+def import_source(source_id, limit, cfg, update, control, data_lock=None, lock_for=None, transcript_urls=None):
     spec = source(source_id)
     if type(limit) is not int or not 1 <= limit <= spec['limit']:
         raise ValueError('导入期数应为 1 至 50 的整数')
+    selected = validate_selection(spec, transcript_urls)
+    if selected is not None:
+        limit = len(selected)
     report = dict(sourceId=source_id, state='running', requested=limit, total=0,
         imported=0, existing=0, summaries=0, failed=0, failures=[], books=[], startedAt=int(time.time()*1000))
 
@@ -258,7 +278,12 @@ def import_source(source_id, limit, cfg, update, control, data_lock=None, lock_f
 
     try:
         progress('正在读取官网全部节目目录')
-        episodes = catalog(spec, fetch_html(spec, spec['url'], control), limit)
+        episodes = catalog(spec, fetch_html(spec, spec['url'], control), 1000 if selected else limit)
+        if selected is not None:
+            available = {episode['sourceUrl'] for episode in episodes}
+            if not set(selected) <= available:
+                raise ValueError('指定节目不在官网可用 Transcript 目录中，未导入任何内容')
+            episodes = [episode for episode in episodes if episode['sourceUrl'] in selected]
         report['total'] = len(episodes)
         progress('正在准备播客系列封面')
         podcast_covers.ensure_series_cover(spec, download=True, control=control)

@@ -322,7 +322,7 @@ class PodcastTests(unittest.TestCase):
         self.assertEqual(self.post('/podcast-sources/unknown/import', {}).status_code, 400)
         self.assertEqual(self.app.test_client().get('/api/podcast-sources').status_code, 401)
         gate = threading.Event()
-        def slow(*args):
+        def slow(*args, **kwargs):
             gate.wait(3)
             return dict(failed=0)
         try:
@@ -336,6 +336,37 @@ class PodcastTests(unittest.TestCase):
                 self.wait_job(first)
         finally:
             gate.set()
+
+    def test_selected_older_transcripts_only_and_repeat_preserves_state(self):
+        selected = ['https://lexfridman.com/guest-2-transcript', 'https://lexfridman.com/guest-1-transcript']
+        with patch.object(podcasts, 'fetch_html', side_effect=fake_fetch) as fetch, patch.object(llm, 'conversation', side_effect=fake_model) as model:
+            result = self.wait_job(self.post('/podcast-sources/lex-fridman/import', dict(transcriptUrls=selected)))
+            self.assertEqual(result['state'], 'done', result)
+            self.assertEqual((result['result']['imported'],result['result']['total']), (2,2))
+            entries = [b for b in store.load_library() if b.get('sourceType')=='podcast']
+            self.assertEqual({b['sourceUrl'] for b in entries}, set(selected))
+            self.assertEqual({b['episodeNumber'] for b in entries}, {1,2})
+            self.assertEqual(model.call_count, 2)
+            store.set_article_state(entries[0]['id'], 0, 'read')
+            fetch.reset_mock(); model.reset_mock()
+            again = self.wait_job(self.post('/podcast-sources/lex-fridman/import', dict(transcriptUrls=selected)))
+            self.assertEqual(again['result']['imported'], 0)
+            self.assertEqual(again['result']['existing'], 2)
+            self.assertEqual(model.call_count, 0)
+            self.assertEqual(fetch.call_count, 1)
+            self.assertEqual(store.load_article_states(entries[0]['id'])['0'], 'read')
+
+    def test_selected_urls_reject_foreign_duplicate_invalid_and_missing_catalog_entries(self):
+        url = 'https://lexfridman.com/guest-2-transcript'
+        for urls in [[], 'all', [url]*51, [url,url+'/'], [None], ['http://lexfridman.com/test-transcript'],
+                     ['https://example.invalid/test-transcript'], [url+'?x=1'], ['https://lexfridman.com/podcast/']]:
+            self.assertEqual(self.post('/podcast-sources/lex-fridman/import', dict(transcriptUrls=urls)).status_code, 400)
+        before = store.load_library()
+        with patch.object(podcasts, 'fetch_html', side_effect=fake_fetch) as fetch:
+            result = self.wait_job(self.post('/podcast-sources/lex-fridman/import', dict(transcriptUrls=[url,'https://lexfridman.com/missing-transcript'])))
+        self.assertEqual(result['state'], 'error')
+        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual(store.load_library(), before)
 
     def test_cancellation_keeps_saved_transcript_for_resume(self):
         control = llm.RequestControl()
