@@ -52,6 +52,7 @@ function linkFor(bookId, index, paragraph=null) {
 }
 function baseFor(reader=state.reader) { return `/books/${encodeURIComponent(reader.bookId)}/articles/${reader.index}`; }
 function showSheet(title, content) {
+  state.reader?.hoverHide?.();
   if(state.reader?.clock){readingClockTick(state.reader);flushReadingClock(state.reader);}
   state.sheet += 1;
   $('#sheet-title').textContent = title;
@@ -62,9 +63,10 @@ function showSheet(title, content) {
 $('#sheet-close').onclick = () => $('#sheet').close();
 $('#sheet').addEventListener('click', event => { if (event.target === $('#sheet')) { const r=$('#sheet').getBoundingClientRect(); if(event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom) $('#sheet').close(); } });
 $('#sheet').addEventListener('close', () => { state.sheet += 1; });
-$('#logout').onclick = action(async () => { if(state.reader)await stopReadingClock(state.reader);await api('/logout', {method:'POST', data:{}}); state.csrf=''; state.reader=null; showLogin(); });
+$('#logout').onclick = action(async () => { if(state.reader){state.reader.hoverCleanup?.();await stopReadingClock(state.reader);}await api('/logout', {method:'POST', data:{}}); state.csrf=''; state.reader=null; showLogin(); });
 
 function showLogin() {
+  state.reader?.hoverCleanup?.();
   if(state.reader)stopReadingClock(state.reader,false);
   $('#navigation').hidden = true;
   if ($('#sheet').open) $('#sheet').close();
@@ -396,6 +398,7 @@ function readingClockReason(reader,now=performance.now()) {
   if(!document.hasFocus())return '失焦暂停';
   if([...state.vocabWaits.values()].includes(baseFor(reader)))return '生词生成暂停';
   if($('#sheet').open)return '弹窗暂停';
+  if(reader.hoverVisible)return '词义提示暂停';
   if(now-reader.clock.lastInteraction>90_000)return '无操作暂停';
   return '计时中';
 }
@@ -466,6 +469,7 @@ function selectedQuote() {
   return {quote,paragraph:Number(node.dataset.index),start:[...prefix.toString()].length+[...leading].length};
 }
 function selectionBar(reader) {
+  reader.hoverHide?.();
   if($('#sheet').open)return;
   const selection=selectedQuote(),bar=$('#selection-tools');
   if(!selection){bar.hidden=true;state.selection=null;reader.selectionRange=null;return;}
@@ -474,6 +478,131 @@ function selectionBar(reader) {
   bar.hidden=false;
   $('span',bar).textContent=selection.quote;
   positionSelectionBar(reader);
+}
+// Index existing entries once when the vocabulary changes. Prose stays as text,
+// including search marks: no per-word DOM nodes, network calls or model requests.
+function vocabHoverTokens(text) {
+  return [...text.matchAll(/[A-Za-z]+(?:['’‘][A-Za-z]+)?/g)].map(m=>({
+    word:m[0].toLowerCase().replace(/[’‘]/g,"'"),start:m.index,end:m.index+m[0].length
+  }));
+}
+function vocabHoverForms(word) {
+  const forms=new Set([word]);
+  if(word.endsWith("'s"))forms.add(word.slice(0,-2));
+  if(word.endsWith('s')&&!word.endsWith('ss'))forms.add(word.slice(0,-1));
+  if(word.endsWith('es'))forms.add(word.slice(0,-2));
+  if(word.endsWith('ies'))forms.add(word.slice(0,-3)+'y');
+  if(word.endsWith('ed')) {
+    forms.add(word.slice(0,-1));forms.add(word.slice(0,-2));
+    if(word.length>4&&word.at(-3)===word.at(-4))forms.add(word.slice(0,-3));
+    if(word.endsWith('ied'))forms.add(word.slice(0,-3)+'y');
+  }
+  if(word.endsWith('ing')) {
+    forms.add(word.slice(0,-3));forms.add(word.slice(0,-3)+'e');
+    if(word.length>5&&word.at(-4)===word.at(-5))forms.add(word.slice(0,-4));
+    if(word.endsWith('ying'))forms.add(word.slice(0,-4)+'ie');
+  }
+  return forms;
+}
+function indexVocabHover(reader) {
+  reader.hoverHide?.();
+  const vocab=reader.vocab.vocab,byFirst=new Map(),groups=new Map();
+  for(const section of [{index:-1,entries:vocab.titleEntries},...vocab.paragraphs]) {
+    for(const entry of section.entries) {
+      const words=vocabHoverTokens(entry.word||'').map(t=>t.word);if(!words.length)continue;
+      const key=words.join(' ');
+      if(!groups.has(key)) {
+        const item={words,entries:new Map(),fallback:entry};groups.set(key,item);
+        if(!byFirst.has(words[0]))byFirst.set(words[0],[]);
+        byFirst.get(words[0]).push(item);
+      }
+      groups.get(key).entries.set(section.index,entry);
+    }
+  }
+  reader.hoverWords=new Map();
+  for(const [paragraph,text] of [[-1,reader.article.title],...reader.article.paragraphs.map((p,i)=>[i,p])]) {
+    const tokens=vocabHoverTokens(text),forms=tokens.map(t=>vocabHoverForms(t.word));
+    for(let i=0;i<tokens.length;i++) {
+      for(const form of forms[i])for(const item of byFirst.get(form)||[]) {
+        const {words}=item,local=item.entries.has(paragraph),entry=item.entries.get(paragraph)||item.fallback;
+        if(i+words.length>tokens.length||!words.every((w,j)=>forms[i+j].has(w)))continue;
+        // Match phrases across spaces/hyphens, never across sentence punctuation.
+        if(words.some((_,j)=>j&&!/^[\s\-–—]+$/.test(text.slice(tokens[i+j-1].end,tokens[i+j].start))))continue;
+        const score=(local?1000:0)+words.length*10+(form===tokens[i].word?1:0);
+        for(let j=0;j<words.length;j++)if(!tokens[i+j].entry||score>tokens[i+j].score) {
+          tokens[i+j].entry=entry;tokens[i+j].score=score;
+        }
+      }
+    }
+    reader.hoverWords.set(paragraph,tokens);
+  }
+}
+function vocabHoverRange(p,start,end) {
+  const range=document.createRange(),walker=document.createTreeWalker(p,NodeFilter.SHOW_TEXT);
+  let node,offset=0,started=false;
+  while((node=walker.nextNode())) {
+    const next=offset+node.length;
+    if(!started&&start<next){range.setStart(node,start-offset);started=true;}
+    if(started&&end<=next){range.setEnd(node,end-offset);return range;}
+    offset=next;
+  }
+  return null;
+}
+function installVocabHover(reader,article) {
+  const tip=el('aside',{id:'vocab-hover',class:'vocab-hover',role:'tooltip',hidden:true});
+  article.append(tip);
+  const controller=new AbortController(),options={signal:controller.signal,passive:true};
+  let timer=null,hover=null;
+  reader.hoverHide=()=>{
+    clearTimeout(timer);timer=null;hover=null;
+    if(!reader.hoverVisible)return;
+    readingClockTick(reader);reader.hoverVisible=false;tip.hidden=true;readingClockTick(reader);
+  };
+  reader.hoverCleanup=()=>{reader.hoverHide();controller.abort();tip.remove();};
+  const blocked=()=>state.reader!==reader||$('#sheet').open||document.hidden||!document.hasFocus()||!getSelection()?.isCollapsed;
+  article.addEventListener('pointermove',event=>{
+    if(event.pointerType!=='mouse'||event.buttons||blocked()){reader.hoverHide();return;}
+    const p=event.target.closest('.paragraph p, .reader-head h1');
+    if(!p){reader.hoverHide();return;}
+    const caret=document.caretPositionFromPoint?.(event.clientX,event.clientY);
+    const fallback=caret?null:document.caretRangeFromPoint?.(event.clientX,event.clientY);
+    const node=caret?.offsetNode||fallback?.startContainer,offset=caret?.offset??fallback?.startOffset;
+    if(!node||!p.contains(node)){reader.hoverHide();return;}
+    const prefix=document.createRange();prefix.selectNodeContents(p);prefix.setEnd(node,offset);
+    const at=prefix.toString().length,paragraph=Number(p.closest('.paragraph')?.dataset.index??-1);
+    const token=reader.hoverWords?.get(paragraph)?.find(t=>t.entry&&at>=t.start&&at<=t.end);
+    const range=token&&vocabHoverRange(p,token.start,token.end);
+    const rect=range&&[...range.getClientRects()].find(r=>event.clientX>=r.left&&event.clientX<=r.right&&event.clientY>=r.top&&event.clientY<=r.bottom);
+    if(!rect){reader.hoverHide();return;}
+    if(hover?.token===token&&hover.p===p)return;
+    reader.hoverHide();hover={token,p};
+    timer=setTimeout(()=>{
+      if(blocked()||!p.isConnected){reader.hoverHide();return;}
+      const entry=token.entry;
+      tip.replaceChildren(el('div',{class:'hover-heading'},el('strong',{},entry.word),el('span',{},[
+        entry.phonetic?'/'+entry.phonetic.replaceAll('/','')+'/':'',entry.pos||''].filter(Boolean).join('  '))),
+        el('p',{class:'hover-sense'},entry.sense||'暂无释义'),
+        entry.inText?el('p',{class:'hover-context'},entry.inText):null,
+        entry.root?el('p',{class:'hover-detail'},'词根 / 词源 · '+entry.root):null,
+        entry.note?el('p',{class:'hover-detail'},'笔记 · '+entry.note):null,
+        el('small',{},'本文生词表 · 完整内容可点「本段生词」'));
+      const viewport=window.visualViewport,left=viewport?.offsetLeft||0,top=viewport?.offsetTop||0;
+      const width=viewport?.width||innerWidth,height=viewport?.height||innerHeight,margin=10;
+      tip.style.maxWidth=Math.max(0,width-2*margin)+'px';tip.style.maxHeight=Math.max(0,height-2*margin)+'px';
+      tip.hidden=false;
+      const size=tip.getBoundingClientRect();let y=rect.bottom+8;
+      if(y+size.height>top+height-margin)y=rect.top-size.height-8;
+      tip.style.left=Math.max(left+margin,Math.min(rect.left,left+width-size.width-margin))+'px';
+      tip.style.top=Math.max(top+margin,Math.min(y,top+height-size.height-margin))+'px';
+      readingClockTick(reader);reader.hoverVisible=true;readingClockTick(reader);
+    },1000);
+  },options);
+  article.addEventListener('pointerleave',reader.hoverHide,options);
+  for(const event of ['pointerdown','keydown','wheel','scroll','blur','resize','pagehide'])
+    window.addEventListener(event,reader.hoverHide,{...options,capture:true});
+  document.addEventListener('visibilitychange',reader.hoverHide,options);
+  window.visualViewport?.addEventListener('resize',reader.hoverHide,options);
+  window.visualViewport?.addEventListener('scroll',reader.hoverHide,options);
 }
 function positionSelectionBar(reader) {
   const bar=$('#selection-tools');if(!bar||bar.hidden||!reader.selectionRange||$('#sheet').open)return;
@@ -502,7 +631,7 @@ async function readerPage(bookId,index,token,startParagraph=null) {
   const progress=el('div',{class:'reader-position'},el('div',{class:'reader-position-labels'},
     el('strong',{id:'reader-percentage'},'阅读进度 0%'),el('span',{id:'reader-paragraph'},`第 1 / ${data.article.paragraphs.length} 段`),
     el('span',{id:'reader-word-count'},`共 ${data.wordCount.toLocaleString()} 词`),
-    el('span',{id:'reader-reading-time',title:'前台阅读自动计时；生词生成、失焦、弹窗或 90 秒无操作时暂停。阅读速度根据计时期间前进的词数估算。'},'准备计时'),
+    el('span',{id:'reader-reading-time',title:'前台阅读自动计时；生词生成、词义提示、失焦、弹窗或 90 秒无操作时暂停。阅读速度根据计时期间前进的词数估算。'},'准备计时'),
     el('span',{class:'reader-save-state',id:'reader-save-state'},'自动同步')),
     el('progress',{id:'reader-progress-bar',max:1,value:0,'aria-label':'文章阅读进度'}));
   const vocabButton=button('生成生词表',action(()=>openVocab(null)),'primary');vocabButton.id='vocab-button';
@@ -550,6 +679,7 @@ async function readerPage(bookId,index,token,startParagraph=null) {
     data.sourceUrl?el('a',{class:'duplicate-source',href:data.sourceUrl,target:'_blank',rel:'noopener noreferrer'},'官方 Transcript ↗'):null,
     data.summaryZh?el('details',{class:'reader-summary'},el('summary',{},data.excerpted?'整期摘要 · 全文分段摘录':'文章摘要'),el('p',{},data.summaryZh)):null),selection,body);
   view.replaceChildren(article);window.scrollTo(0,0);
+  installVocabHover(reader,article);
   document.addEventListener('selectionchange',reader.selectionHandler=()=>{if(state.reader===reader)selectionBar(reader);});
   window.addEventListener('resize',reader.selectionResize=()=>positionSelectionBar(reader));
   window.visualViewport?.addEventListener('resize',reader.selectionResize);
@@ -575,8 +705,9 @@ async function readerPage(bookId,index,token,startParagraph=null) {
   await saveProgress();
   await loadVocab(reader);
 }
-function resizeReader(reader,delta){reader.fontSize=Math.max(16,Math.min(30,reader.fontSize+delta));$('#reader-body').style.setProperty('--reading-size',reader.fontSize+'px');localStorage.setItem('kandu-font',reader.fontSize);updateReaderProgress(reader);}
+function resizeReader(reader,delta){reader.hoverHide?.();reader.fontSize=Math.max(16,Math.min(30,reader.fontSize+delta));$('#reader-body').style.setProperty('--reading-size',reader.fontSize+'px');localStorage.setItem('kandu-font',reader.fontSize);updateReaderProgress(reader);}
 function findArticle(reader,query) {
+  reader.hoverHide?.();
   let count=0;const needle=query.toLocaleLowerCase();
   reader.article.paragraphs.forEach((text,i)=>{
     const p=$('#para-'+i+' p');p.replaceChildren();
@@ -589,6 +720,7 @@ function findArticle(reader,query) {
 async function loadVocab(reader) {
   const response=await api(baseFor(reader)+'/vocab');if(state.reader!==reader)return;
   reader.vocab=response;
+  indexVocabHover(reader);
   const count=response.vocab.titleEntries.length+response.vocab.paragraphs.reduce((n,p)=>n+p.entries.length,0);
   $('#vocab-button').textContent=!response.generated?'生成生词表':response.missing.length?`补缺生词表 · ${response.missing.length} 段`:`生词表 ${count}`;
   for(let i=0;i<reader.article.paragraphs.length;i++) {
@@ -906,6 +1038,7 @@ function editModel(initial) {
 }
 
 async function route() {
+  state.reader?.hoverCleanup?.();
   clearTimeout(state.settingsTimer);
   if(!state.csrf){showLogin();return;}
   state.statsCleanup?.();state.statsCleanup=null;
