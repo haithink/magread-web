@@ -15,6 +15,61 @@ const button = (text, callback, cls = '') => el('button', {type:'button', class:
 const state = {csrf:'', route:0, reader:null, selection:null, activeJobs:new Map(), jobObservers:new Map(), vocabWaits:new Map(), sheet:0, sheetWait:null};
 const view = $('#app');
 const readingId=()=>Array.from(crypto.getRandomValues(new Uint8Array(16)),v=>v.toString(16).padStart(2,'0')).join('');
+// Diagnostics contain only phase names, random IDs, viewport/DOM state and
+// static-source coordinates. Never pass selected text, URLs or error messages.
+const readerDiagnostics=(()=>{
+  const page=readingId().slice(0,16),build=new URL(document.currentScript.src).searchParams.get('v')||'';
+  const platform=/iPhone|iPad|iPod/.test(navigator.userAgent)?'ios':/Android/.test(navigator.userAgent)?'android':'desktop';
+  const engine=/AppleWebKit/.test(navigator.userAgent)&&!/Chrome\//.test(navigator.userAgent)?'webkit':/Chrome\//.test(navigator.userAgent)?'chromium':'other';
+  let active=null,sequence=0,queue=[],timer=null,sending=false,lastBeat=performance.now();
+  async function flush(){
+    clearTimeout(timer);timer=null;
+    if(sending||!queue.length||!state.csrf||!navigator.onLine)return;
+    sending=true;const batch=queue.splice(0,12),controller=new AbortController();
+    const timeout=setTimeout(()=>controller.abort(),8000);
+    try{await fetch('/api/diagnostics',{method:'POST',credentials:'same-origin',keepalive:true,
+      headers:{'Content-Type':'application/json','X-CSRF-Token':state.csrf},
+      body:JSON.stringify({events:batch}),signal:controller.signal});}catch{}
+    finally{clearTimeout(timeout);sending=false;if(queue.length)timer=setTimeout(flush,300);}
+  }
+  function event(name,extra={},context=active){
+    try{
+      if(!context&&!name.startsWith('page.'))return;
+      const sheet=$('#sheet'),wait=$('#sheet-wait');
+      queue.push({event:name,page,build,platform,engine,sequence:sequence++,
+        trace:context?.trace,phase:context?.phase,job:context?.job,polls:context?.polls,
+        elapsedMs:context?Math.round(performance.now()-context.started):0,
+        sheet:state.sheet,activeJobs:state.activeJobs.size,hidden:document.hidden,online:navigator.onLine,
+        standalone:matchMedia('(display-mode:standalone)').matches||navigator.standalone===true,
+        dialogOpen:!!sheet?.open,dialogModal:!!sheet?.matches(':modal'),waitPresent:!!wait,waitHidden:!!wait?.hidden,
+        width:innerWidth,height:innerHeight,visualHeight:Math.round(window.visualViewport?.height||innerHeight),scrollY:Math.round(scrollY),...extra});
+      queue=queue.slice(-72);
+      if(!timer)timer=setTimeout(flush,150);
+    }catch{} // Diagnostic failures must never affect UI interaction.
+  }
+  function error(name,value,context=active){
+    const frame=String(value?.stack||'').match(/\/(app|reading-cache|pwa)\.js(?:\?[^\s:)]*)?:(\d+):(\d+)/);
+    event(name,{errorName:value?.name||'Error',...(frame?{source:frame[1]+'.js',line:Number(frame[2]),column:Number(frame[3])}:{})},context);
+  }
+  window.addEventListener('error',e=>error('page.error',e.error));
+  window.addEventListener('unhandledrejection',e=>error('page.rejection',e.reason));
+  document.addEventListener('visibilitychange',()=>{if(active){event('page.visibility');flush();}});
+  for(const name of ['pageshow','online','focus'])window.addEventListener(name,()=>{if(active)event('page.resume');flush();});
+  window.addEventListener('pagehide',flush);
+  for(const [type,name] of [['pointerdown','sheet.pointer'],['click','sheet.click']])document.addEventListener(type,e=>{
+    if(!active)return;
+    const target=e.target.closest?.('.sheet-wait-close,.sheet-wait-footer button,#sheet-close,#sheet-background');
+    if(target)event(name,{control:target.matches('.sheet-wait-close')?'wait-close':target.matches('.sheet-wait-footer button')?'wait-view':target.id==='sheet-close'?'sheet-close':'sheet-background'});
+  },{capture:true,passive:true});
+  setInterval(()=>{const now=performance.now(),gapMs=Math.round(now-lastBeat);lastBeat=now;
+    if(active&&state.sheetWait)event('wait.heartbeat',{gapMs});},15000);
+  return {event,error,start(){
+    const context=active={trace:readingId().slice(0,12),phase:'start',started:performance.now(),polls:0};event('analysis.start');
+    return {step(phase,extra={}){context.phase=phase;Object.assign(context,extra);event('analysis.'+phase,extra,context);},
+      poll(job){context.polls++;if(context.polls===1||context.state!==job.state){context.state=job.state;event('analysis.poll',{jobState:job.state},context);}},
+      error(value){error('page.error',value,context);}};
+  }};
+})();
 function syncVisualViewport() {
   const viewport=window.visualViewport;
   document.documentElement.style.setProperty('--visual-height',(viewport?.height||innerHeight)+'px');
@@ -240,7 +295,7 @@ const cacheAuth=typeof BroadcastChannel==='function'?new BroadcastChannel('kandu
 cacheAuth?.addEventListener('message',event=>{if(event.data==='logout'&&state.csrf){state.csrf='';cacheEpoch++;cacheRequests.clear();localReading.clear();ReadingSync.reset();ReadingCache.clear();showLogin();}});
 window.addEventListener('online',()=>{ReadingSync.drain().catch(()=>{});refreshRemoteProgress();if(state.reader)loadVocab(state.reader,{fresh:true}).catch(()=>{});});
 setInterval(()=>{if(state.csrf){ReadingSync.drain().catch(()=>{});refreshRemoteProgress();}},15_000);
-function action(callback) { return (...args) => { if(args[0]?.type==='submit')args[0].preventDefault();return Promise.resolve().then(() => callback(...args)).catch(error => toast(error.message)); }; }
+function action(callback) { return (...args) => { if(args[0]?.type==='submit')args[0].preventDefault();return Promise.resolve().then(() => callback(...args)).catch(error => {readerDiagnostics.error('page.error',error);toast(error.message);}); }; }
 function empty(title, text='') { return el('div', {class:'empty'}, el('h2', {}, title), el('p', {}, text)); }
 function heading(kicker, title, subtitle, actions=[]) {
   return el('div', {class:'page-heading'}, el('div', {}, el('span', {class:'eyebrow'}, kicker), el('h1', {}, title),
@@ -263,14 +318,18 @@ function clearSheetWait() {
   $('#sheet-background').hidden=true;
 }
 function closeSheet() {
+  readerDiagnostics.event('sheet.close');
   readingClockTick();state.sheet++;clearSheetWait();hideSheetDialog();readingClockTick();
+  readerDiagnostics.event('sheet.closed');
 }
 function centerSheet() {
+  readerDiagnostics.event('sheet.center');
   const x=scrollX,y=scrollY;
   readingClockTick();
   if(!$('#sheet').open)$('#sheet').showModal();
   window.scrollTo({left:x,top:y,behavior:'instant'});
   readingClockTick();flushReadingClock();
+  readerDiagnostics.event('sheet.centered');
 }
 function positionSheetWait() {
   const wait=state.sheetWait;if(!wait||wait.card.hidden)return;
@@ -296,12 +355,14 @@ function positionSheetWait() {
 }
 function dockSheet(sheet) {
   const wait=state.sheetWait;if(!wait||sheet!==state.sheet)return;
+  readerDiagnostics.event('sheet.dock');
   const x=scrollX,y=scrollY,wasOpen=$('#sheet').open;
   readingClockTick();hideSheetDialog();wait.card.hidden=false;
   $('#sheet-background').hidden=true;
   if(wasOpen)view.focus({preventScroll:true});
   window.scrollTo({left:x,top:y,behavior:'instant'});
   positionSheetWait();readingClockTick();
+  readerDiagnostics.event('sheet.docked');
 }
 function waitForSheet(sheet, reader, paragraph=null, status='正在准备请求…') {
   if(sheet!==state.sheet||state.reader!==reader)return;
@@ -328,6 +389,7 @@ function updateSheetWait(sheet,status) {
   if(sheet===state.sheet&&state.sheetWait)state.sheetWait.label.textContent=status||'正在等待模型响应…';
 }
 function finishSheetWait(sheet) {
+  readerDiagnostics.event('sheet.finish');
   if(sheet!==state.sheet)return false;
   if(state.sheetWait&&state.sheetWait.reader!==state.reader)return false;
   clearSheetWait();centerSheet();return true;
@@ -351,7 +413,7 @@ $('#sheet-close').before(el('button',{id:'sheet-background',type:'button',hidden
 $('#sheet-close').onclick = closeSheet;
 $('#sheet').addEventListener('cancel',event=>{event.preventDefault();closeSheet();});
 $('#sheet').addEventListener('click', event => { if (event.target === $('#sheet')) { const r=$('#sheet').getBoundingClientRect(); if(event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom) closeSheet(); } });
-$('#sheet').addEventListener('close', () => { if(sheetCloseEvents){sheetCloseEvents--;return;}state.sheet++;clearSheetWait(); });
+$('#sheet').addEventListener('close', () => { readerDiagnostics.event('sheet.native-close');if(sheetCloseEvents){sheetCloseEvents--;return;}state.sheet++;clearSheetWait(); });
 document.addEventListener('keydown',event=>{if(event.key==='Escape'&&state.sheetWait&&!$('#sheet').open){event.preventDefault();closeSheet();}});
 $('#logout').onclick = action(async () => {
   if(state.reader){state.reader.hoverCleanup?.();saveProgress(true);stopReadingClock(state.reader);}
@@ -415,6 +477,7 @@ function watchJob(jobId,onDone,onUpdate,onSettled,onFailure) {
       setTimeout(poll,650);
     } catch(error) {
       const observers=state.jobObservers.get(jobId)||[];
+      readerDiagnostics.error('page.error',error);
       state.activeJobs.delete(jobId);state.jobObservers.delete(jobId);
       for(const observer of observers)if(observer.onSettled)observer.onSettled();
       for(const observer of observers)if(observer.onFailure)observer.onFailure(error);
@@ -1610,23 +1673,29 @@ function contextMeaningNode(meaning,compact=false) {
 async function analyzeSelection(reader) {
   const cacheOwner=state.cacheIdentity;
   const chosen={...state.selection};if(!chosen.quote)return;
+  const diagnostic=readerDiagnostics.start();
   const output=el('div',{},el('p',{class:'quote'},chosen.quote),el('p',{class:'muted'},'正在准备句子讲解…'));
   const sheet=showSheet('句子讲解',output,{reader,paragraph:chosen.paragraph,status:'正在准备句子讲解…'});
   const cacheKey='analysis:'+JSON.stringify([baseFor(reader),reader.contentVersion,state.modelRevision,chosen.quote]);
+  diagnostic.step('cache-read');
   const cached=await ReadingCache.get(cacheKey);
+  diagnostic.step('cache-ready');
   if(sheet!==state.sheet)return;
-  if(cached){renderAnalysis(output,cached.value,chosen.quote,{bookId:reader.bookId,index:reader.index,paragraph:chosen.paragraph});finishSheetWait(sheet);return;}
-  const failure=message=>{if(sheet!==state.sheet)return;output.replaceChildren(el('p',{class:'quote'},chosen.quote),el('p',{class:'error'},message));finishSheetWait(sheet);};
+  if(cached){diagnostic.step('render');renderAnalysis(output,cached.value,chosen.quote,{bookId:reader.bookId,index:reader.index,paragraph:chosen.paragraph});finishSheetWait(sheet);diagnostic.step('rendered');return;}
+  const failure=message=>{diagnostic.step('failure');if(sheet!==state.sheet)return;output.replaceChildren(el('p',{class:'quote'},chosen.quote),el('p',{class:'error'},message));finishSheetWait(sheet);};
   try {
-    await runJob(baseFor(reader)+'/analyze',{sentence:chosen.quote,paragraph:chosen.paragraph},async job=>{
-      if(job.state==='done'&&state.csrf&&cacheOwner===state.cacheIdentity)await ReadingCache.put(cacheKey,job.result,{group:baseFor(reader)});
+    diagnostic.step('submit');
+    const jobId=await runJob(baseFor(reader)+'/analyze',{sentence:chosen.quote,paragraph:chosen.paragraph},async job=>{
+      if(job.state==='done'&&state.csrf&&cacheOwner===state.cacheIdentity){diagnostic.step('cache-write');await ReadingCache.put(cacheKey,job.result,{group:baseFor(reader)});diagnostic.step('cache-saved');}
       if(sheet!==state.sheet)return;
       if(job.state!=='done'){failure(job.error||'未能完成讲解');return;}
-      renderAnalysis(output,job.result,chosen.quote,{bookId:reader.bookId,index:reader.index,paragraph:chosen.paragraph});
+      diagnostic.step('render');renderAnalysis(output,job.result,chosen.quote,{bookId:reader.bookId,index:reader.index,paragraph:chosen.paragraph});
       finishSheetWait(sheet);
-    },job=>{if(sheet===state.sheet&&job.state!=='done'){$('p.muted',output).textContent=job.status;updateSheetWait(sheet,job.status);}},
+      diagnostic.step('rendered');
+    },job=>{diagnostic.poll(job);if(sheet===state.sheet&&job.state!=='done'){$('p.muted',output).textContent=job.status;updateSheetWait(sheet,job.status);}},
       ()=>failure('连接中断，服务器仍会保存结果。可稍后重新打开句子讲解。'));
-  }catch(error){failure(error.message);}
+    diagnostic.step('accepted',{job:jobId});
+  }catch(error){diagnostic.error(error);failure(error.message);}
 }
 function renderAnalysis(output,data,sentence,source=null) {
   output.replaceChildren(el('div',{class:'analysis-sentence'},sentence));

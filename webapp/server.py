@@ -25,6 +25,7 @@ from webapp import __version__
 from webapp import reading_stats
 from webapp import reading_activity
 from webapp import pwa
+from webapp.diagnostics import Diagnostics, clean_event
 from webapp import word_meaning
 from webapp import article_duplicates
 from webapp import article_tags
@@ -49,10 +50,11 @@ def clean_error(error):
 
 
 class Jobs:
-    def __init__(self):
+    def __init__(self, diagnostics=None):
         self.pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix='kandu-web')
         self.lock = threading.RLock()
         self.items = OrderedDict()
+        self.diagnostics = diagnostics
 
     def submit(self, key, action):
         with self.lock:
@@ -77,14 +79,25 @@ class Jobs:
                 job.update(values)
 
         def run():
+            started = time.monotonic()
+            def record(event, **extra):
+                if self.diagnostics:
+                    self.diagnostics.write(dict(event=event, job=job_id, kind=key[0],
+                        elapsedMs=round((time.monotonic()-started)*1000), **extra))
             try:
                 update(state='running', status='准备中')
+                record('job.started')
                 result = action(update, job['control'])
                 update(state='done', status='已完成', result=result)
+                record('job.done')
             except llm.RequestCancelled:
                 update(state='stopped', status='已停止')
+                record('job.stopped')
             except Exception as error:
                 update(state='error', error=clean_error(error), status='任务未完成')
+                record('job.error', errorName=type(error).__name__)
+        if self.diagnostics:
+            self.diagnostics.write(dict(event='job.submitted', job=job_id, kind=key[0]))
         self.pool.submit(run)
         return job_id
 
@@ -123,7 +136,9 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare
     hosts = {'localhost', '127.0.0.1', '::1', socket.gethostname().lower(), *[h.lower() for h in allowed_hosts]}
     hosts.update(r[4][0] for r in socket.getaddrinfo(socket.gethostname(), None))
     hosts.update(app.config['HTTPS_HOSTS'])
-    jobs = Jobs()
+    diagnostics = Diagnostics(root)
+    app.extensions['diagnostics'] = diagnostics
+    jobs = Jobs(diagnostics)
     app.extensions['jobs'] = jobs
     data_lock = threading.RLock()
     book_locks = {}
@@ -935,6 +950,24 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare
                     discussion.save(meta, art, history)
                 return dict(excerpted=excerpted)
         return accepted(jobs.submit(('discussion', book_id, index, question, quote, para), work))
+
+    @app.post('/api/diagnostics')
+    def reader_diagnostics():
+        if request.content_length is None or request.content_length > 12 * 1024:
+            abort(413, '诊断数据过大')
+        if not diagnostics.reserve():
+            return jsonify(error='诊断请求过多'), 429
+        body = request.get_json()
+        events = body.get('events') if isinstance(body, dict) else None
+        if not isinstance(events, list) or not 1 <= len(events) <= 12:
+            abort(400, '诊断格式无效')
+        try:
+            rows = [clean_event(event) for event in events]
+        except ValueError:
+            abort(400, '诊断格式无效')
+        for row in rows:
+            diagnostics.write(dict(origin='browser', **row))
+        return jsonify(accepted=len(rows))
 
     @app.get('/api/jobs/<job_id>')
     def job(job_id):

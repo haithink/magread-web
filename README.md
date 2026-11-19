@@ -250,9 +250,13 @@ Web 登录密码、HttpOnly/SameSite 会话、CSRF、请求来源与访问主机
 
 ## 测试与开发
 
+手机端句子讲解若出现等待窗口不消失、结果未显示或按钮失效，可先重新加载网页，再复现并记下发生时间。页面会自动发送不含正文、错误消息、密码和密钥的诊断阶段记录，和服务端任务事件共同保存到数据目录的 `diagnostics/reader-events.jsonl`（Windows 默认 `%LOCALAPPDATA%\KanduWeb\diagnostics\reader-events.jsonl`）。记录包含随机任务编号、缓存/渲染阶段、弹窗状态、关闭按钮触控和异常源码行列；等待时每 15 秒记录一次心跳。断网或页面主线程完全阻塞时，尚未送达的记录可能丢失，需结合服务端事件及最后一条记录判断。每个文件约 2 MiB，最多保留当前文件及 3 份轮换文件，均位于 Git 仓库外。
+
 ```bash
 python -m pip install -r requirements-dev.txt
 python tests/run_web_tests.py
+python tests/run_diagnostics_tests.py
+python tests/run_diagnostics_browser_tests.py
 python tests/run_login_security_tests.py
 python tests/run_access_upload_tests.py
 python tests/run_reading_stats_tests.py
