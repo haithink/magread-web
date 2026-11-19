@@ -103,6 +103,7 @@ def main():
                 assert page.evaluate('getSelection().isCollapsed')
                 assert page.locator('#para-4 p').evaluate("n=>getComputedStyle(n).userSelect")!='none'
                 assert page.evaluate('state.selection.quote')=='candid'
+                expect(page.locator('#selection-lookup')).to_be_visible()
                 assert page.evaluate("[...CSS.highlights.get('kandu-touch-selection')][0].toString()")=='candid'
                 assert page.evaluate('state.selection.start')==len(PARAGRAPHS[4][:PARAGRAPHS[4].index('candid')])
                 assert not llm_calls
@@ -113,6 +114,11 @@ def main():
                 # Select the sentence without invoking OS text selection or an LLM.
                 page.locator('#selection-expand').tap()
                 assert page.evaluate('state.selection.quote')=='🌙 A candid reader follows the argument.'
+                expect(page.locator('#selection-lookup')).not_to_be_visible()
+                # Copy replaces the browser callout without saving a phrase as a word.
+                page.evaluate("() => Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async text=>{window.copiedText=text}}})")
+                page.get_by_role('button',name='复制',exact=True).tap()
+                page.wait_for_function("() => copiedText==='🌙 A candid reader follows the argument.'")
                 assert page.evaluate('getSelection().isCollapsed')
                 assert snapshot(page)==before
                 shot(page,f'mobile-selection-{width}-{height}-{engine}')
@@ -125,7 +131,7 @@ def main():
                 expect(page.locator('#sheet')).to_be_visible()
                 assert snapshot(page)==before
                 page.locator('#sheet-close').tap()
-                # Native context menus are suppressed only for point mode prose.
+                # Prose callouts are suppressed; other page controls keep their menus.
                 assert page.locator('#para-4 p').evaluate("n=>!n.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true}))")
                 assert page.locator('#badge-4').evaluate("n=>n.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true}))")
                 # Cancelled/moved/multitouch/long gestures must not select or start a request.
@@ -177,7 +183,7 @@ def main():
                 # Keep free text selection/copy available and remember the user's mode.
                 page.locator('#reader-more-toggle').tap();page.locator('#touch-mode-toggle').tap()
                 assert page.locator('#para-4 p').evaluate("n=>getComputedStyle(n).userSelect")!='none'
-                assert page.locator('#para-4 p').evaluate("n=>n.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true}))")
+                assert page.locator('#para-4 p').evaluate("n=>!n.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true}))")
                 native_point=word_point(page,'paper over',4)
                 page.evaluate("y=>scrollBy({top:y-innerHeight/2,behavior:'instant'})",native_point['y'])
                 page.evaluate('''()=>{
@@ -187,6 +193,8 @@ def main():
                 }''')
                 expect(page.locator('#selection-tools')).to_be_visible()
                 assert page.evaluate('state.selection.quote')=='paper over'
+                expect(page.locator('#selection-lookup')).not_to_be_visible()
+                expect(page.get_by_role('button',name='句子讲解',exact=True)).to_be_visible()
                 assert page.locator('#selection-tools').bounding_box()['y']>height-200
                 shot(page,f'mobile-native-selection-{width}-{height}-{engine}')
                 page.reload();expect(page.locator('#touch-reading-help')).to_contain_text('长按文字')
@@ -202,6 +210,19 @@ def main():
                 assert page.evaluate('state.selection.quote')=='candid'
                 page.get_by_role('button',name='关闭选词操作').tap()
                 assert page.evaluate("!CSS.highlights.has('kandu-touch-selection')")
+                # Repeated taps on an ordinary word keep its lookup available;
+                # neither touch taps nor a synthesized dblclick invoke the model.
+                calls_before=len(llm_calls)
+                point=tap_word(page,'uncertainties')
+                expect(page.locator('#selection-lookup')).to_be_visible()
+                assert len(llm_calls)==calls_before
+                page.touchscreen.tap(point['x'],point['y'])
+                expect(page.locator('#selection-lookup')).to_be_visible()
+                page.locator('#para-4 p').dispatch_event('dblclick')
+                page.wait_for_timeout(100)
+                assert len(llm_calls)==calls_before
+                expect(page.locator('#sheet')).not_to_be_visible()
+                page.get_by_role('button',name='关闭选词操作').tap()
                 # Dialogs and inputs remain usable when a mobile keyboard shrinks the visual viewport.
                 page.get_by_role('button',name='与 AI 讨论',exact=True).tap()
                 input=page.get_by_role('textbox',name='向 AI 提问');input.fill('Why?')

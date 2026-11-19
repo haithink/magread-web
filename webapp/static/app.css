@@ -60,7 +60,7 @@ body:has(#sheet-wait:not([hidden])) #jobbar{display:none}
 .point-reading .paragraph p{-webkit-touch-callout:none}
 .point-reading.point-press .paragraph p{-webkit-user-select:none;user-select:none}
 .reader-toolbar,.selection-tools{touch-action:manipulation}
-@media(pointer:coarse){.reader-toolbar .touch-mode-toggle{display:inline-flex}.touch-reading-help{display:block;font-size:12px;line-height:1.8;color:var(--muted);margin:-10px 0 22px}}
+@media(pointer:coarse){.reader-toolbar .touch-mode-toggle{display:inline-flex}.touch-reading-help{display:block;font-size:12px;line-height:1.8;color:var(--muted);margin:-10px 0 22px}.paragraph p{-webkit-touch-callout:none}}
 @media(max-width:600px), (pointer:coarse) and (max-width:1000px) and (max-height:500px){
   html{scroll-padding-top:135px;scroll-behavior:auto;-webkit-text-size-adjust:100%;text-size-adjust:100%}
   body{padding-top:env(safe-area-inset-top);padding-left:env(safe-area-inset-left);padding-right:env(safe-area-inset-right)}

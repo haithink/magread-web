@@ -1030,6 +1030,9 @@ function clearReaderSelection(reader,clearNative=false) {
   const bar=$('#selection-tools');if(bar)bar.hidden=true;
   if(clearNative)getSelection()?.removeAllRanges();
 }
+function isSingleSelectedWord(quote) {
+  return /^[A-Za-z]+(?:['’‘-][A-Za-z]+)*$/.test(quote.trim());
+}
 function showReaderSelection(reader,chosen,range,touch=false) {
   reader.hoverHide?.();state.selection=chosen;reader.selectionRange=range;
   reader.touchSelection=touch?chosen:null;
@@ -1037,6 +1040,7 @@ function showReaderSelection(reader,chosen,range,touch=false) {
   if(touch&&supportsVocabHighlights())CSS.highlights.set('kandu-touch-selection',new Highlight(range));
   const bar=$('#selection-tools');bar.hidden=false;bar.classList.toggle('touch-selection',touch);
   $('span',bar).textContent=chosen.quote;
+  $('#selection-lookup').hidden=!isSingleSelectedWord(chosen.quote);
   $('#selection-expand').hidden=!touch;
   const whole=touch&&chosen.quote===sentenceSelection(reader,chosen).quote;
   $('#selection-expand').disabled=whole;$('#selection-expand').textContent=whole?'已选整句':'选整句';
@@ -1062,7 +1066,7 @@ function installTouchReading(reader,body,toggle) {
     toggle.textContent=reader.pointActive?'切换为系统选文':'切换为点词';
     toggle.setAttribute('aria-pressed',String(reader.pointActive));
     const help=$('#touch-reading-help');if(help)help.textContent=reader.pointActive?
-      '轻点单词可操作，标出生词直接显示本文释义。「更多」中可切换系统选文。':'长按文字并拖动选区，可选短语、复制；刊读操作栏显示在屏幕底部。';
+      '轻点单词可操作，标出生词直接显示本文释义。「更多」中可切换系统选文。':'长按文字并拖动选区，可选短语；复制、讲解等刊读操作显示在屏幕底部。';
   };
   toggle.onclick=()=>{
     cancelPress();
@@ -1073,7 +1077,7 @@ function installTouchReading(reader,body,toggle) {
   };
   media.addEventListener('change',update,options);update();
   body.addEventListener('contextmenu',event=>{
-    if(reader.pointActive&&event.target.closest('.paragraph p'))event.preventDefault();
+    if(media.matches&&event.target.closest('.paragraph p'))event.preventDefault();
   },options);
   body.addEventListener('selectstart',event=>{
     const target=event.target instanceof Element?event.target:event.target.parentElement;
@@ -1481,7 +1485,12 @@ async function readerPage(bookId,index,token,startParagraph=null) {
       const start=[...text].slice(0,chosen.start).join('').length;
       showReaderSelection(reader,chosen,vocabHoverRange($('#para-'+chosen.paragraph+' p'),start,start+chosen.quote.length),true);
     }},'选整句'),
-    button('查词并收藏',action(()=>lookupSelection(reader))),button('句子讲解',action(()=>analyzeSelection(reader))),
+    el('button',{type:'button',id:'selection-lookup',onclick:action(()=>lookupSelection(reader))},'查词并收藏'),
+    button('复制',action(async()=>{
+      const quote=state.selection?.quote;if(!quote)return;
+      if(!navigator.clipboard?.writeText){toast('当前浏览器不支持直接复制，请使用系统选文。');return;}
+      await navigator.clipboard.writeText(quote);toast('已复制');
+    })),button('句子讲解',action(()=>analyzeSelection(reader))),
     button('引用提问',action(()=>discussionSheet(reader,state.selection))),
     el('button',{type:'button','aria-label':'关闭选词操作',onclick:()=>clearReaderSelection(reader,true)},'×'));
   const body=el('div',{class:'reader-body',id:'reader-body'});
@@ -1491,7 +1500,9 @@ async function readerPage(bookId,index,token,startParagraph=null) {
     const paragraph=el('section',{class:'paragraph',id:'para-'+i,'data-index':i},badge,el('p',{},text));
     paragraph.addEventListener('dblclick',action(async event=>{
       if(event.target.closest('button'))return;
-      if(reader.pointActive&&(reader.touchSelection||reader.hoverTouch))return;
+      // Point mode keeps lookups explicit, including after a second tap. The
+      // browser's synthesized dblclick must not start sentence analysis.
+      if(reader.pointActive)return;
       let chosen=selectedQuote();
       if(chosen) {
         chosen=sentenceSelection(reader,chosen);
@@ -1675,7 +1686,7 @@ async function vocabSheet(reader,paragraph) {
 }
 async function lookupSelection(reader) {
   const cacheOwner=state.cacheIdentity;
-  const chosen={...state.selection};if(!chosen.quote)return;
+  const chosen={...state.selection};if(!chosen.quote||!isSingleSelectedWord(chosen.quote))return;
   const output=el('div',{},el('p',{class:'muted'},'正在查词…'));
   const sheet=showSheet('查词 · 本文含义',output,{reader,paragraph:chosen.paragraph,status:'正在查词…'});
   $('#selection-tools').hidden=true;

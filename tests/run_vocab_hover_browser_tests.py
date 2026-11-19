@@ -257,6 +257,7 @@ def main():
                 }''')
                 expect(tip).not_to_be_visible()
                 expect(page.locator('#selection-tools')).to_be_visible()
+                expect(page.locator('#selection-lookup')).not_to_be_visible()
                 page.evaluate('getSelection().removeAllRanges()')
                 expect(page.locator('#selection-tools')).not_to_be_visible()
 

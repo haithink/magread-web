@@ -135,6 +135,7 @@ def main():
                     tip.get_by_role('button',name='选词 / 讲解',exact=True).tap()
                     expect(page.locator('#selection-tools')).to_be_visible()
                     assert page.evaluate('state.selection.quote')=='paper over'
+                    expect(page.locator('#selection-lookup')).not_to_be_visible()
                     page.get_by_role('button',name='关闭选词操作').tap()
                 # Ordinary words retain the existing actions; scrolling dismisses hints.
                 tap(page,'reader')
