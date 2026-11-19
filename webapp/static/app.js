@@ -888,7 +888,7 @@ function installTouchReading(reader,body,toggle) {
     toggle.textContent=reader.pointActive?'切换为系统选文':'切换为点词';
     toggle.setAttribute('aria-pressed',String(reader.pointActive));
     const help=$('#touch-reading-help');if(help)help.textContent=reader.pointActive?
-      '轻点单词，可查词、选整句或提问。「更多」中可切换系统选文。':'长按文字并拖动选区，可选短语、复制；刊读操作栏显示在屏幕底部。';
+      '轻点单词可操作，标出生词直接显示本文释义。「更多」中可切换系统选文。':'长按文字并拖动选区，可选短语、复制；刊读操作栏显示在屏幕底部。';
   };
   toggle.onclick=()=>{
     cancelPress();
@@ -933,7 +933,17 @@ function installTouchReading(reader,body,toggle) {
     if(!range||![...range.getClientRects()].some(r=>event.clientX>=r.left-1&&event.clientX<=r.right+1&&event.clientY>=r.top&&event.clientY<=r.bottom)){
       clearReaderSelection(reader);return;
     }
-    showReaderSelection(reader,{quote:text.slice(word.start,word.end),paragraph:Number(start.p.closest('.paragraph').dataset.index),
+    const paragraph=Number(start.p.closest('.paragraph').dataset.index);
+    const known=reader.hoverWords?.get(paragraph)?.find(t=>t.entry&&t.start===word.start);
+    if(known){
+      const phraseRange=vocabHoverRange(start.p,known.highlightStart,known.highlightEnd);
+      const rect=[...range.getClientRects()].find(r=>event.clientY>=r.top&&event.clientY<=r.bottom);
+      clearReaderSelection(reader,true);
+      reader.showVocabHint(known.entry,paragraph,rect,{range:phraseRange,chosen:{
+        quote:text.slice(known.highlightStart,known.highlightEnd),paragraph,start:[...text.slice(0,known.highlightStart)].length}});
+      return;
+    }
+    showReaderSelection(reader,{quote:text.slice(word.start,word.end),paragraph,
       start:[...text.slice(0,word.start)].length},range,true);
   },options);
   // A gesture that becomes a pan/pinch must never turn into a lookup.
@@ -953,7 +963,7 @@ function installTouchReading(reader,body,toggle) {
   reader.touchCleanup=()=>{cancelPress();controller.abort();clearReaderSelection(reader);};
 }
 function selectionBar(reader) {
-  reader.hoverHide?.();
+  if(!reader.hoverTouch||!getSelection()?.isCollapsed)reader.hoverHide?.();
   if($('#sheet').open)return;
   const selection=selectedQuote(),bar=$('#selection-tools');
   if(!selection&&reader.touchSelection){positionSelectionBar(reader);return;}
@@ -1069,11 +1079,12 @@ function installVocabHover(reader,article) {
   const cancelHide=()=>{clearTimeout(hideTimer);hideTimer=null;};
   const insideTip=event=>event.target instanceof Node&&tip.contains(event.target);
   reader.hoverHide=()=>{
-    clearTimeout(timer);cancelHide();timer=null;hover=null;
+    clearTimeout(timer);cancelHide();timer=null;hover=null;reader.hoverTouch=false;
     if(!reader.hoverVisible)return;
     readingClockTick(reader);reader.hoverVisible=false;tip.hidden=true;readingClockTick(reader);
   };
   const deferHide=()=>{
+    if(reader.hoverTouch)return;
     if(!reader.hoverVisible){reader.hoverHide();return;}
     if(hideTimer)return;
     // Leave enough time to cross the small gap between the word and its card.
@@ -1083,9 +1094,52 @@ function installVocabHover(reader,article) {
     },250);
   };
   reader.hoverCleanup=()=>{reader.hoverHide();controller.abort();tip.remove();window.CSS?.highlights?.delete('kandu-vocabulary');};
+  // Both mouse dwell and touch taps reuse the same existing paragraph entry.
+  reader.showVocabHint=(entry,paragraph,rect,touch=null)=>{
+    if(state.reader!==reader||$('#sheet').open)return;
+    reader.hoverTouch=!!touch;
+    const collect=button(entry.inWordbook?'已在生词本 ✓':'＋ 加入生词本',action(async()=>{
+      if(collect.disabled)return;
+      collect.disabled=true;collect.textContent='正在加入…';
+      try{
+        const saved=await collectVocabEntry(entry,{bookId:reader.bookId,index:reader.index,paragraph});
+        collect.textContent='已加入生词本 ✓';
+        if(state.reader===reader){
+          const spellings=new Set([saved.word,...saved.aliases].map(w=>w.toLowerCase().replaceAll('’',"'").trim()));
+          for(const item of [...reader.vocab.vocab.titleEntries,...reader.vocab.vocab.paragraphs.flatMap(p=>p.entries)]){
+            if(spellings.has((item.wordbookWord||item.word).toLowerCase().replaceAll('’',"'").trim())){
+              item.inWordbook=true;item.wordbookWord=saved.word;
+            }
+          }
+          await ReadingCache.put(baseFor(reader)+'/vocab',reader.vocab,{group:baseFor(reader),checked:0});
+        }
+        toast('已加入个人生词本');
+      }catch(error){collect.disabled=false;collect.textContent='重试加入生词本';throw error;}
+    }),'hover-collect');
+    collect.disabled=!!entry.inWordbook;
+    tip.replaceChildren(...[el('div',{class:'hover-heading'},el('strong',{},entry.word),el('span',{},[
+      entry.phonetic?'/'+entry.phonetic.replaceAll('/','')+'/':'',entry.pos||''].filter(Boolean).join('  '))),
+      el('p',{class:'hover-sense'},entry.sense||'暂无释义'),
+      entry.inText?el('p',{class:'hover-context'},entry.inText):null,
+      entry.root?el('p',{class:'hover-detail'},'词根 / 词源 · '+entry.root):null,
+      entry.note?el('p',{class:'hover-detail'},'笔记 · '+entry.note):null,
+      el('div',{class:'hover-actions'},
+        touch?button('选词 / 讲解',()=>showReaderSelection(reader,touch.chosen,touch.range,true)):null,collect,
+        touch?el('button',{type:'button','aria-label':'关闭生词释义',onclick:reader.hoverHide},'关闭'):null),
+      el('small',{},'本文生词表 · 完整内容可点「本段生词」')].filter(node=>node!=null));
+    const {left,top,width,height}=readingViewport(),margin=10;
+    tip.style.maxWidth=Math.max(0,width-2*margin)+'px';tip.style.maxHeight=Math.max(0,height-2*margin)+'px';
+    tip.hidden=false;
+    const size=tip.getBoundingClientRect();let y=rect.bottom+8;
+    if(y+size.height>top+height-margin)y=rect.top-size.height-8;
+    tip.style.left=Math.max(left+margin,Math.min(rect.left,left+width-size.width-margin))+'px';
+    tip.style.top=Math.max(top+margin,Math.min(y,top+height-size.height-margin))+'px';
+    readingClockTick(reader);reader.hoverVisible=true;readingClockTick(reader);
+  };
   const blocked=()=>state.reader!==reader||$('#sheet').open||document.hidden||!document.hasFocus()||!getSelection()?.isCollapsed;
   article.addEventListener('pointermove',event=>{
-    if(event.pointerType!=='mouse'||event.buttons||blocked()){reader.hoverHide();return;}
+    if(event.pointerType!=='mouse')return;
+    if(event.buttons||blocked()){reader.hoverHide();return;}
     if(insideTip(event)){cancelHide();return;}
     const p=event.target.closest('.paragraph p, .reader-head h1');
     if(!p){deferHide();return;}
@@ -1104,42 +1158,7 @@ function installVocabHover(reader,article) {
     reader.hoverHide();hover={token,p};
     timer=setTimeout(()=>{
       if(blocked()||!p.isConnected){reader.hoverHide();return;}
-      const entry=token.entry;
-      const collect=button(entry.inWordbook?'已在生词本 ✓':'＋ 加入生词本',action(async()=>{
-        if(collect.disabled)return;
-        collect.disabled=true;collect.textContent='正在加入…';
-        try{
-          const saved=await collectVocabEntry(entry,{bookId:reader.bookId,index:reader.index,paragraph});
-          collect.textContent='已加入生词本 ✓';
-          if(state.reader===reader){
-            const spellings=new Set([saved.word,...saved.aliases].map(w=>w.toLowerCase().replaceAll('’',"'").trim()));
-            for(const item of [...reader.vocab.vocab.titleEntries,...reader.vocab.vocab.paragraphs.flatMap(p=>p.entries)]){
-              if(spellings.has((item.wordbookWord||item.word).toLowerCase().replaceAll('’',"'").trim())){
-                item.inWordbook=true;item.wordbookWord=saved.word;
-              }
-            }
-            await ReadingCache.put(baseFor(reader)+'/vocab',reader.vocab,{group:baseFor(reader),checked:0});
-          }
-          toast('已加入个人生词本');
-        }catch(error){collect.disabled=false;collect.textContent='重试加入生词本';throw error;}
-      }),'hover-collect');
-      collect.disabled=!!entry.inWordbook;
-      tip.replaceChildren(el('div',{class:'hover-heading'},el('strong',{},entry.word),el('span',{},[
-        entry.phonetic?'/'+entry.phonetic.replaceAll('/','')+'/':'',entry.pos||''].filter(Boolean).join('  '))),
-        el('p',{class:'hover-sense'},entry.sense||'暂无释义'),
-        entry.inText?el('p',{class:'hover-context'},entry.inText):null,
-        entry.root?el('p',{class:'hover-detail'},'词根 / 词源 · '+entry.root):null,
-        entry.note?el('p',{class:'hover-detail'},'笔记 · '+entry.note):null,
-        el('div',{class:'hover-actions'},collect),
-        el('small',{},'本文生词表 · 完整内容可点「本段生词」'));
-      const {left,top,width,height}=readingViewport(),margin=10;
-      tip.style.maxWidth=Math.max(0,width-2*margin)+'px';tip.style.maxHeight=Math.max(0,height-2*margin)+'px';
-      tip.hidden=false;
-      const size=tip.getBoundingClientRect();let y=rect.bottom+8;
-      if(y+size.height>top+height-margin)y=rect.top-size.height-8;
-      tip.style.left=Math.max(left+margin,Math.min(rect.left,left+width-size.width-margin))+'px';
-      tip.style.top=Math.max(top+margin,Math.min(y,top+height-size.height-margin))+'px';
-      readingClockTick(reader);reader.hoverVisible=true;readingClockTick(reader);
+      reader.showVocabHint(token.entry,paragraph,rect);
     },1000);
   },options);
   tip.addEventListener('pointerenter',cancelHide,options);
@@ -1263,7 +1282,7 @@ async function readerPage(bookId,index,token,startParagraph=null) {
     const paragraph=el('section',{class:'paragraph',id:'para-'+i,'data-index':i},badge,el('p',{},text));
     paragraph.addEventListener('dblclick',action(async event=>{
       if(event.target.closest('button'))return;
-      if(reader.pointActive&&reader.touchSelection)return;
+      if(reader.pointActive&&(reader.touchSelection||reader.hoverTouch))return;
       let chosen=selectedQuote();
       if(chosen) {
         chosen=sentenceSelection(reader,chosen);
@@ -1322,20 +1341,30 @@ function findArticle(reader,query) {
   updateVocabHighlights(reader);
 }
 async function loadVocab(reader,{fresh=false}={}) {
-  const response=await api(baseFor(reader)+'/vocab',{fresh,onUpdate:value=>applyVocab(reader,value)});
-  applyVocab(reader,response);
+  if(!fresh&&reader.vocabLoading)return reader.vocabLoading;
+  const pending=(async()=>{
+    const response=await api(baseFor(reader)+'/vocab',{fresh,onUpdate:value=>applyVocab(reader,value)});
+    applyVocab(reader,response);
+  })();
+  reader.vocabLoading=pending;
+  try{await pending;}finally{if(reader.vocabLoading===pending)reader.vocabLoading=null;}
 }
 function applyVocab(reader,response){
   if(state.reader!==reader)return;
   if(response.contentVersion&&reader.contentVersion&&response.contentVersion!==reader.contentVersion){cacheNotice('文章正文已更新，刷新后查看新版正文与词表。');return;}
+  reader.vocabLoadedAt=Date.now();
+  const signature=JSON.stringify(response);
+  if(reader.vocabSignature===signature)return;
+  reader.vocabSignature=signature;
   reader.vocab=response;
   indexVocabHover(reader);
   updateVocabHighlights(reader);
   const count=response.vocab.titleEntries.length+response.vocab.paragraphs.reduce((n,p)=>n+p.entries.length,0);
   $('#vocab-button').textContent=!response.generated?'生成生词表':response.missing.length?`补缺生词表 · ${response.missing.length} 段`:`生词表 ${count}`;
+  const sections=new Map(response.vocab.paragraphs.map(p=>[p.index,p.entries])),missing=new Set(response.missing);
   for(let i=0;i<reader.article.paragraphs.length;i++) {
-    const entries=response.vocab.paragraphs.find(p=>p.index===i)?.entries||[];
-    $('#badge-'+i).textContent=response.missing.includes(i)?`本段生词 · 待生成${entries.length?' · 已有 '+entries.length+' 项':''}`:`词 ${entries.length} · 本段生词`;
+    const entries=sections.get(i)||[];
+    $('#badge-'+i).textContent=missing.has(i)?`本段生词 · 待生成${entries.length?' · 已有 '+entries.length+' 项':''}`:`词 ${entries.length} · 本段生词`;
   }
 }
 function sourceNode(source) {
@@ -1377,7 +1406,20 @@ async function collectVocabEntry(entry,source=null){
 }
 async function openVocab(paragraph) {
   const reader=state.reader;if(!reader)return;
-  await loadVocab(reader);if(state.reader!==reader)return;
+  if(!reader.vocab){
+    const sheet=showSheet('生词与短语',el('p',{class:'muted',role:'status'},'正在读取已有词表…'));
+    try{await loadVocab(reader);}catch(error){
+      if(sheet===state.sheet)$('#sheet-content').replaceChildren(el('p',{class:'error'},error.message),button('重试',action(()=>openVocab(paragraph))));
+      return;
+    }
+    if(state.reader!==reader||sheet!==state.sheet)return;
+    if(!reader.vocab){$('#sheet-content').replaceChildren(el('p',{},'正文版本已更新，请刷新文章后再打开词表。'));return;}
+  }else if(Date.now()-reader.vocabLoadedAt>30_000){
+    // Render from memory first. Validation must never delay opening a paragraph,
+    // even when IndexedDB is busy or the server is reached over a slow tunnel.
+    reader.vocabLoadedAt=Date.now();
+    setTimeout(()=>{if(state.reader===reader)loadVocab(reader).catch(()=>{});},0);
+  }
   // Toolbar starts full generation directly for ungenerated/partial article vocabulary.
   if(paragraph===null&&(!reader.vocab.generated||reader.vocab.missing.length)) {
     await generateReaderVocab(reader,null);return;
