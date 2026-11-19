@@ -61,7 +61,7 @@ def main():
             expect.set_options(timeout=15000 if engine=='webkit' else 5000)
             for width,height in [(393,659),(393,852),(320,740),(600,852)]:
                 context=browser.new_context(viewport=dict(width=width,height=height),screen=dict(width=width,height=852),
-                    device_scale_factor=3,is_mobile=True,has_touch=True)
+                    device_scale_factor=3,is_mobile=True,has_touch=True,service_workers='block')
                 page=context.new_page();page.on('pageerror',lambda error:errors.append(str(error)))
                 print(f'Checking {engine} {width}x{height}',flush=True)
                 llm_calls=[];jobs={}
@@ -118,6 +118,7 @@ def main():
                 shot(page,f'mobile-selection-{width}-{height}-{engine}')
                 page.get_by_role('button',name='句子讲解',exact=True).tap()
                 expect(page.locator('#sheet-wait')).to_be_visible()
+                page.wait_for_function('() => state.activeJobs.size>0')
                 assert llm_calls[-1]['sentence']=='🌙 A candid reader follows the argument.'
                 assert page.evaluate("!CSS.highlights.has('kandu-touch-selection')")
                 jobs['test']=dict(state='done',status='完成',result=dict(translation='一位坦率的读者。'))

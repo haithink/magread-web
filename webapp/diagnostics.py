@@ -30,11 +30,11 @@ def clean_event(value):
         if isinstance(value.get(key), str) and re.fullmatch(pattern, value[key]):
             result[key] = value[key]
     for key in ('elapsedMs', 'sequence', 'sheet', 'width', 'height', 'visualHeight',
-                'scrollY', 'activeJobs', 'polls', 'line', 'column', 'gapMs'):
+                'scrollY', 'activeJobs', 'polls', 'line', 'column', 'gapMs', 'highlightRanges'):
         number = value.get(key)
         if type(number) in (int, float) and 0 <= number <= 10**10:
             result[key] = round(number)
-    for key in ('hidden', 'online', 'standalone', 'dialogOpen', 'dialogModal', 'waitPresent', 'waitHidden'):
+    for key in ('hidden', 'online', 'standalone', 'dialogOpen', 'dialogModal', 'waitPresent', 'waitHidden', 'modalHighlightsSuspended'):
         if type(value.get(key)) is bool:
             result[key] = value[key]
     for key, choices in (('phase', PHASES), ('errorName', ERRORS),

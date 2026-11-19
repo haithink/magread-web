@@ -257,6 +257,7 @@ python -m pip install -r requirements-dev.txt
 python tests/run_web_tests.py
 python tests/run_diagnostics_tests.py
 python tests/run_diagnostics_browser_tests.py
+python tests/run_long_reading_browser_tests.py
 python tests/run_login_security_tests.py
 python tests/run_access_upload_tests.py
 python tests/run_reading_stats_tests.py

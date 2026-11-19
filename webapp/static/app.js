@@ -42,6 +42,8 @@ const readerDiagnostics=(()=>{
         sheet:state.sheet,activeJobs:state.activeJobs.size,hidden:document.hidden,online:navigator.onLine,
         standalone:matchMedia('(display-mode:standalone)').matches||navigator.standalone===true,
         dialogOpen:!!sheet?.open,dialogModal:!!sheet?.matches(':modal'),waitPresent:!!wait,waitHidden:!!wait?.hidden,
+        highlightRanges:window.CSS?.highlights?.get('kandu-vocabulary')?.size||0,
+        modalHighlightsSuspended:!!state.reader?.highlightsSuspended,
         width:innerWidth,height:innerHeight,visualHeight:Math.round(window.visualViewport?.height||innerHeight),scrollY:Math.round(scrollY),...extra});
       queue=queue.slice(-72);
       if(!timer)timer=setTimeout(flush,150);
@@ -307,7 +309,20 @@ function linkFor(bookId, index, paragraph=null) {
 function baseFor(reader=state.reader) { return `/books/${encodeURIComponent(reader.bookId)}/articles/${reader.index}`; }
 let sheetCloseEvents=0;
 function hideSheetDialog() {
-  if($('#sheet').open){sheetCloseEvents++;$('#sheet').close();}
+  if($('#sheet').open){sheetCloseEvents++;$('#sheet').close();restoreReaderHighlights();}
+}
+function restoreReaderHighlights() {
+  const reader=state.reader;if(!reader)return;
+  reader.highlightsSuspended=false;
+  if(reader.highlightRestoreFrame)return;
+  reader.highlightRestoreFrame=requestAnimationFrame(()=>{
+    reader.highlightRestoreFrame=null;
+    if(state.reader!==reader||reader.highlightsSuspended||$('#sheet').open)return;
+    if(reader.vocabHighlightsDirty)updateVocabHighlights(reader);
+    else if(reader.vocabHighlightEnabled&&reader.suspendedVocabHighlight)
+      window.CSS?.highlights?.set('kandu-vocabulary',reader.suspendedVocabHighlight);
+    reader.suspendedVocabHighlight=null;
+  });
 }
 function clearSheetWait() {
   const wait=state.sheetWait;if(!wait)return;
@@ -326,6 +341,15 @@ function centerSheet() {
   readerDiagnostics.event('sheet.center');
   const x=scrollX,y=scrollY;
   readingClockTick();
+  // WebKit can stall painting a modal over thousands of Custom Highlight
+  // ranges. The prose is covered while modal: restore its tint after closing.
+  if(state.reader){
+    state.reader.highlightsSuspended=true;
+    const highlight=window.CSS?.highlights?.get('kandu-vocabulary');
+    if(highlight)state.reader.suspendedVocabHighlight=highlight;
+  }
+  window.CSS?.highlights?.delete('kandu-vocabulary');
+  window.CSS?.highlights?.delete('kandu-touch-selection');
   if(!$('#sheet').open)$('#sheet').showModal();
   window.scrollTo({left:x,top:y,behavior:'instant'});
   readingClockTick();flushReadingClock();
@@ -413,7 +437,7 @@ $('#sheet-close').before(el('button',{id:'sheet-background',type:'button',hidden
 $('#sheet-close').onclick = closeSheet;
 $('#sheet').addEventListener('cancel',event=>{event.preventDefault();closeSheet();});
 $('#sheet').addEventListener('click', event => { if (event.target === $('#sheet')) { const r=$('#sheet').getBoundingClientRect(); if(event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom) closeSheet(); } });
-$('#sheet').addEventListener('close', () => { readerDiagnostics.event('sheet.native-close');if(sheetCloseEvents){sheetCloseEvents--;return;}state.sheet++;clearSheetWait(); });
+$('#sheet').addEventListener('close', () => { readerDiagnostics.event('sheet.native-close');if(sheetCloseEvents){sheetCloseEvents--;return;}state.sheet++;clearSheetWait();restoreReaderHighlights(); });
 document.addEventListener('keydown',event=>{if(event.key==='Escape'&&state.sheetWait&&!$('#sheet').open){event.preventDefault();closeSheet();}});
 $('#logout').onclick = action(async () => {
   if(state.reader){state.reader.hoverCleanup?.();saveProgress(true);stopReadingClock(state.reader);}
@@ -1178,6 +1202,8 @@ function indexVocabHover(reader) {
 function supportsVocabHighlights() { return Boolean(window.CSS?.highlights&&typeof Highlight==='function'); }
 function updateVocabHighlights(reader) {
   if(!supportsVocabHighlights())return;
+  if(reader.highlightsSuspended){reader.vocabHighlightsDirty=true;CSS.highlights.delete('kandu-vocabulary');return;}
+  reader.suspendedVocabHighlight=null;reader.vocabHighlightsDirty=false;
   const highlight=new Highlight();
   if(reader.vocabHighlightEnabled)for(let paragraph=0;paragraph<reader.paragraphNodes.length;paragraph++) {
     const p=$('p',reader.paragraphNodes[paragraph]),spans=[];
@@ -1239,7 +1265,8 @@ function installVocabHover(reader,article) {
       if(!tip.matches(':hover')&&!keyboardFocus)reader.hoverHide();
     },250);
   };
-  reader.hoverCleanup=()=>{reader.hoverHide();controller.abort();tip.remove();window.CSS?.highlights?.delete('kandu-vocabulary');};
+  reader.hoverCleanup=()=>{reader.hoverHide();controller.abort();tip.remove();cancelAnimationFrame(reader.highlightRestoreFrame);
+    reader.highlightRestoreFrame=null;reader.suspendedVocabHighlight=null;window.CSS?.highlights?.delete('kandu-vocabulary');};
   // Both mouse dwell and touch taps reuse the same existing paragraph entry.
   reader.showVocabHint=(entry,paragraph,rect,touch=null)=>{
     if(state.reader!==reader||$('#sheet').open)return;
@@ -1686,12 +1713,18 @@ async function analyzeSelection(reader) {
   try {
     diagnostic.step('submit');
     const jobId=await runJob(baseFor(reader)+'/analyze',{sentence:chosen.quote,paragraph:chosen.paragraph},async job=>{
-      if(job.state==='done'&&state.csrf&&cacheOwner===state.cacheIdentity){diagnostic.step('cache-write');await ReadingCache.put(cacheKey,job.result,{group:baseFor(reader)});diagnostic.step('cache-saved');}
-      if(sheet!==state.sheet)return;
-      if(job.state!=='done'){failure(job.error||'未能完成讲解');return;}
-      diagnostic.step('render');renderAnalysis(output,job.result,chosen.quote,{bookId:reader.bookId,index:reader.index,paragraph:chosen.paragraph});
-      finishSheetWait(sheet);
-      diagnostic.step('rendered');
+      if(sheet===state.sheet){
+        if(job.state!=='done'){failure(job.error||'未能完成讲解');return;}
+        diagnostic.step('render');renderAnalysis(output,job.result,chosen.quote,{bookId:reader.bookId,index:reader.index,paragraph:chosen.paragraph});
+        finishSheetWait(sheet);diagnostic.step('rendered');
+      }
+      // Server already saved the explanation. A delayed local cache must not
+      // prevent showing it or keep this job's completion callbacks pending.
+      if(job.state==='done'&&state.csrf&&cacheOwner===state.cacheIdentity){
+        diagnostic.step('cache-write');
+        Promise.resolve().then(()=>ReadingCache.put(cacheKey,job.result,{group:baseFor(reader)}))
+          .then(()=>diagnostic.step('cache-saved')).catch(error=>diagnostic.error(error));
+      }
     },job=>{diagnostic.poll(job);if(sheet===state.sheet&&job.state!=='done'){$('p.muted',output).textContent=job.status;updateSheetWait(sheet,job.status);}},
       ()=>failure('连接中断，服务器仍会保存结果。可稍后重新打开句子讲解。'));
     diagnostic.step('accepted',{job:jobId});

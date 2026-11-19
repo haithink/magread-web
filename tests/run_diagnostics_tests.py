@@ -48,12 +48,15 @@ class DiagnosticTests(unittest.TestCase):
         response = self.post(dict(events=[dict(event='page.error', page='0123456789abcdef', trace='abcdef012345',
             phase='cache-read', errorName='TypeError', source='app.js', line=99, column=12,
             dialogOpen=False, dialogModal=False, waitPresent=True, elapsedMs=20,
+            highlightRanges=9372, modalHighlightsSuspended=True,
             text=forbidden, message=forbidden, stack=forbidden, apiKey=forbidden,
             build=forbidden, job=forbidden + '\n', control=forbidden, engine=forbidden)]))
         self.assertEqual(response.status_code, 200)
         row = json.loads(self.diagnostics.path.read_text().splitlines()[-1])
         self.assertEqual(row['line'], 99)
         self.assertEqual(row['phase'], 'cache-read')
+        self.assertEqual(row['highlightRanges'], 9372)
+        self.assertTrue(row['modalHighlightsSuspended'])
         self.assertNotIn(forbidden, json.dumps(row))
         self.assertFalse(any(key in row for key in ('text', 'message', 'stack', 'apiKey', 'build', 'job', 'control', 'engine')))
         with tempfile.TemporaryDirectory(prefix='kandu-diagnostics-') as directory:
