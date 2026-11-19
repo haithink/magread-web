@@ -104,6 +104,9 @@ class ActivityTests(unittest.TestCase):
             self.assertEqual(sum(day['measuredWords'] for day in stats['analytics']['daily']),words)
             self.assertEqual(stats['articleCount'],0)
             self.assertEqual(stats['totalWords'],0)
+            self.assertEqual(stats['analytics']['sources'],[])
+            self.assertEqual(sum(s['words'] for s in stats['analytics']['readingSources']),words)
+            self.assertEqual(stats['analytics']['readingSources'][0]['unfinishedArticleCount'],1)
         # Completing early replaces partial credit with full volume, without
         # changing measured words, speed or the original timing ledger.
         self.post('/books/sample/state',dict(articleIndex=0,state='read'))
@@ -114,6 +117,9 @@ class ActivityTests(unittest.TestCase):
         self.assertEqual(stats['analytics']['readingVolume'],dict(totalWords=2000,completedWords=2000,
             unfinishedWords=0,unfinishedArticleCount=0))
         self.assertEqual(stats['analytics']['totals']['wordsPerMinute'],200)
+        self.assertEqual(stats['analytics']['readingSources'][0]['words'],2000)
+        self.assertEqual(stats['analytics']['readingSources'][0]['unfinishedArticleCount'],0)
+        self.assertEqual(stats['analytics']['readingSources'][0]['completedArticleCount'],1)
         self.assertEqual(self.report(days=7).json['analytics']['readingVolume'],stats['analytics']['readingVolume'])
         # Removing a completion does not remove the reading already measured.
         self.post('/books/sample/state',dict(articleIndex=0,state='unread'))
@@ -149,6 +155,42 @@ class ActivityTests(unittest.TestCase):
         self.assertEqual(stats['analytics']['readingVolume']['totalWords'],2150)
         self.assertEqual(stats['analytics']['totals']['measuredWords'],210)
         self.assertEqual(sum(d['measuredWords'] for d in stats['analytics']['daily']),210)
+
+    def test_reading_sources_attribute_partial_duplicates_and_replace_on_completion(self):
+        publications={'sample':'Wired','podcast':'Lex Fridman Podcast'}
+        def read(book,index,title,words,session):
+            meta={'id':book}
+            article=dict(self.art,index=index,title=title)
+            baseline=dict(sessionId=session,sequence=0,elapsedMs=0,paragraphIndex=0,paragraphOffset=0)
+            activity.record(meta,article,baseline)
+            self.now+=30_000
+            activity.record(meta,article,{**baseline,'sequence':1,'elapsedMs':30_000,
+                'paragraphOffset':words*5})
+        read('podcast',0,'A candid view',80,'podcast-source-00001')
+        read('sample',0,'A CANDID VIEW!',80,'magazine-source-0001')
+        read('podcast',1,'A second unfinished interview',20,'podcast-source-00002')
+        # No words sampled: neither opening nor stationary time invents volume.
+        read('sample',1,'No words yet',0,'magazine-source-0002')
+        report=activity.report([],publications=publications)
+        self.assertEqual(report['sources'],[])
+        self.assertEqual(report['readingSources'],[dict(name='Lex Fridman Podcast',articleCount=2,
+            words=100,completedArticleCount=0,unfinishedArticleCount=2,completedWords=0,unfinishedWords=100)])
+        # A larger duplicate estimate moves attribution to that source, without adding copies.
+        read('sample',0,'A candid view',10,'magazine-source-0003')
+        report=activity.report([],publications=publications)
+        self.assertEqual([(s['name'],s['words']) for s in report['readingSources']],
+            [('Wired',90),('Lex Fridman Podcast',20)])
+        completed=[dict(title=self.art['title'],wordCount=2000,sources=[
+            reading_stats.web_source({'id':'podcast','title':'Interviews','fileName':'interviews.epub'},self.art,self.now)])]
+        report=activity.report(completed,publications=publications)
+        self.assertEqual(report['readingSources'],[dict(name='Lex Fridman Podcast',articleCount=2,
+            words=2020,completedArticleCount=1,unfinishedArticleCount=1,completedWords=2000,unfinishedWords=20)])
+        self.assertEqual(sum(s['words'] for s in report['readingSources']),report['readingVolume']['totalWords'])
+        self.assertEqual(report['totals']['measuredWords'],190)
+        # A deleted publication remains represented without exposing internal IDs.
+        missing=activity.report([],publications={})
+        self.assertEqual(missing['readingSources'][0]['name'],'其他来源')
+        self.assertEqual(missing['readingSources'][0]['words'],110)
 
     def test_returning_to_previous_paragraph_does_not_count_same_words_again(self):
         self.pulse()

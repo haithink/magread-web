@@ -145,10 +145,11 @@ def main():
                 page.get_by_role('button',name='关闭选词操作').tap()
                 tap(page,'candid');expect(tip).to_be_visible()
                 page.evaluate('scrollBy(0,60)');expect(tip).not_to_be_visible()
-                # Rapid repeated taps on marked prose must never start analysis.
+                # Separate single taps on marked prose remain passive lookups.
                 point=word_point(page,'candid',4);snapshot(page)
                 point=word_point(page,'candid',4,scroll=False)
-                page.touchscreen.tap(point['x'],point['y']);page.touchscreen.tap(point['x'],point['y'])
+                page.touchscreen.tap(point['x'],point['y']);page.wait_for_timeout(500)
+                page.touchscreen.tap(point['x'],point['y'])
                 expect(tip).to_be_visible()
                 tip.get_by_role('button',name='关闭生词释义').tap()
                 # A pan/cancel/multitouch on an existing word must not show a hint.

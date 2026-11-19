@@ -344,6 +344,7 @@ function closeSheet() {
 function centerSheet() {
   readerDiagnostics.event('sheet.center');
   const x=scrollX,y=scrollY;
+  state.reader?.hoverHide?.();
   readingClockTick();
   // WebKit can stall painting a modal over thousands of Custom Highlight
   // ranges. The prose is covered while modal: restore its tint after closing.
@@ -1057,8 +1058,9 @@ function sentenceSelection(reader,chosen) {
 }
 function installTouchReading(reader,body,toggle) {
   const controller=new AbortController(),options={signal:controller.signal};
-  const media=matchMedia('(pointer:coarse)');let touch=null;
+  const media=matchMedia('(pointer:coarse)');let touch=null,lastTap=null;
   const cancelPress=()=>{touch=null;body.classList.remove('point-press');};
+  const cancelGesture=()=>{cancelPress();lastTap=null;};
   reader.pointMode=localStorage.getItem('kandu-touch-mode')!=='select';
   const update=()=>{
     reader.pointActive=media.matches&&reader.pointMode;
@@ -1066,14 +1068,14 @@ function installTouchReading(reader,body,toggle) {
     toggle.textContent=reader.pointActive?'切换为系统选文':'切换为点词';
     toggle.setAttribute('aria-pressed',String(reader.pointActive));
     const help=$('#touch-reading-help');if(help)help.textContent=reader.pointActive?
-      '轻点单词可操作，标出生词直接显示本文释义。「更多」中可切换系统选文。':'长按文字并拖动选区，可选短语；复制、讲解等刊读操作显示在屏幕底部。';
+      '轻点单词可查词、收藏，标出生词直接显示本文释义；双击单词讲解所在句子。「更多」中可切换系统选文。':'长按文字并拖动选区，可选短语；复制、讲解等刊读操作显示在屏幕底部。';
   };
   toggle.onclick=()=>{
-    cancelPress();
+    cancelGesture();
     clearReaderSelection(reader,true);reader.pointMode=!reader.pointMode;
     localStorage.setItem('kandu-touch-mode',reader.pointMode?'point':'select');update();
     $('.reader-toolbar')?.classList.remove('options-open');$('#reader-more-toggle')?.setAttribute('aria-expanded','false');
-    toast(reader.pointActive?'点词模式：轻点单词，再选查词、整句或提问。':'系统选文：长按并拖动选区，可选短语和复制文字。');
+    toast(reader.pointActive?'点词模式：轻点查词、收藏，双击讲解所在句子。':'系统选文：长按并拖动选区，可选短语和复制文字。');
   };
   media.addEventListener('change',update,options);update();
   body.addEventListener('contextmenu',event=>{
@@ -1085,7 +1087,7 @@ function installTouchReading(reader,body,toggle) {
   },options);
   body.addEventListener('pointerdown',event=>{
     cancelPress();
-    if(!reader.pointActive||event.pointerType==='mouse'||!event.isPrimary||event.button!==0)return;
+    if(!reader.pointActive||event.pointerType==='mouse'||!event.isPrimary||event.button!==0){lastTap=null;return;}
     const p=event.target.closest('.paragraph p');if(!p)return;
     touch={id:event.pointerId,x:event.clientX,y:event.clientY,time:performance.now(),scroll:scrollY,p};
     // WebKit skips Custom Highlight painting on user-select:none text. Suppress
@@ -1094,24 +1096,33 @@ function installTouchReading(reader,body,toggle) {
     body.classList.add('point-press');
   },{...options,passive:true});
   body.addEventListener('pointermove',event=>{
-    if(touch&&Math.hypot(event.clientX-touch.x,event.clientY-touch.y)>10)cancelPress();
+    if(touch&&Math.hypot(event.clientX-touch.x,event.clientY-touch.y)>10)cancelGesture();
   },{...options,passive:true});
-  body.addEventListener('pointercancel',cancelPress,options);
+  body.addEventListener('pointercancel',cancelGesture,options);
   body.addEventListener('pointerup',event=>{
     const start=touch;cancelPress();
-    if(!start||event.pointerId!==start.id||performance.now()-start.time>550||Math.abs(scrollY-start.scroll)>3||$('#sheet').open)return;
+    if(!start||event.pointerId!==start.id||performance.now()-start.time>550||Math.abs(scrollY-start.scroll)>3||$('#sheet').open){lastTap=null;return;}
     const caret=document.caretPositionFromPoint?.(event.clientX,event.clientY);
     const fallback=caret?null:document.caretRangeFromPoint?.(event.clientX,event.clientY);
     const node=caret?.offsetNode||fallback?.startContainer,offset=caret?.offset??fallback?.startOffset;
-    if(!node||!start.p.contains(node))return;
+    if(!node||!start.p.contains(node)){lastTap=null;return;}
     const prefix=document.createRange();prefix.selectNodeContents(start.p);prefix.setEnd(node,offset);
     const text=start.p.textContent,at=prefix.toString().length;
     const word=vocabHoverTokens(text).find(t=>at>=t.start&&at<=t.end);
     const range=word&&vocabHoverRange(start.p,word.start,word.end);
     if(!range||![...range.getClientRects()].some(r=>event.clientX>=r.left-1&&event.clientX<=r.right+1&&event.clientY>=r.top&&event.clientY<=r.bottom)){
-      clearReaderSelection(reader);return;
+      lastTap=null;clearReaderSelection(reader);return;
     }
     const paragraph=Number(start.p.closest('.paragraph').dataset.index);
+    const chosen={quote:text.slice(word.start,word.end),paragraph,start:[...text.slice(0,word.start)].length};
+    const now=performance.now(),double=lastTap&&now-lastTap.time<=400&&lastTap.paragraph===paragraph&&lastTap.start===word.start
+      &&Math.abs(scrollY-lastTap.scroll)<3&&Math.hypot(event.clientX-lastTap.x,event.clientY-lastTap.y)<=24;
+    lastTap=double?null:{time:now,paragraph,start:word.start,scroll:scrollY,x:event.clientX,y:event.clientY};
+    if(double){
+      event.preventDefault();reader.hoverHide?.();clearReaderSelection(reader,true);
+      action(()=>{if(state.reader!==reader)return;state.selection=sentenceSelection(reader,chosen);return analyzeSelection(reader);})();
+      return;
+    }
     const known=reader.hoverWords?.get(paragraph)?.find(t=>t.entry&&t.start===word.start);
     if(known){
       const phraseRange=vocabHoverRange(start.p,known.highlightStart,known.highlightEnd);
@@ -1121,24 +1132,26 @@ function installTouchReading(reader,body,toggle) {
         quote:text.slice(known.highlightStart,known.highlightEnd),paragraph,start:[...text.slice(0,known.highlightStart)].length}});
       return;
     }
-    showReaderSelection(reader,{quote:text.slice(word.start,word.end),paragraph,
-      start:[...text.slice(0,word.start)].length},range,true);
+    showReaderSelection(reader,chosen,range,true);
   },options);
   // A gesture that becomes a pan/pinch must never turn into a lookup.
   document.addEventListener('pointerdown',event=>{
-    if(!event.isPrimary)cancelPress();
+    if(!event.isPrimary)cancelGesture();
+    if(!event.target.closest('.paragraph p'))lastTap=null;
     if(reader.touchSelection&&!event.target.closest('#selection-tools,.paragraph p'))clearReaderSelection(reader);
     if(!event.target.closest('.reader-toolbar')){
       $('.reader-toolbar')?.classList.remove('options-open');$('#reader-more-toggle')?.setAttribute('aria-expanded','false');
     }
   },{...options,passive:true});
   document.addEventListener('keydown',event=>{
+    lastTap=null;
     if(event.key!=='Escape'||$('#sheet').open)return;
     clearReaderSelection(reader);$('.reader-toolbar')?.classList.remove('options-open');$('#reader-more-toggle')?.setAttribute('aria-expanded','false');
   },options);
-  window.addEventListener('blur',cancelPress,options);
-  document.addEventListener('visibilitychange',()=>{if(document.hidden)cancelPress();},options);
-  reader.touchCleanup=()=>{cancelPress();controller.abort();clearReaderSelection(reader);};
+  for(const name of ['blur','resize'])window.addEventListener(name,cancelGesture,options);
+  window.addEventListener('scroll',()=>{if(lastTap&&Math.abs(scrollY-lastTap.scroll)>3)lastTap=null;},{...options,passive:true});
+  document.addEventListener('visibilitychange',()=>{if(document.hidden)cancelGesture();},options);
+  reader.touchCleanup=()=>{cancelGesture();controller.abort();clearReaderSelection(reader);};
 }
 function selectionBar(reader) {
   if(!reader.hoverTouch||!getSelection()?.isCollapsed)reader.hoverHide?.();
@@ -1500,8 +1513,8 @@ async function readerPage(bookId,index,token,startParagraph=null) {
     const paragraph=el('section',{class:'paragraph',id:'para-'+i,'data-index':i},badge,el('p',{},text));
     paragraph.addEventListener('dblclick',action(async event=>{
       if(event.target.closest('button'))return;
-      // Point mode keeps lookups explicit, including after a second tap. The
-      // browser's synthesized dblclick must not start sentence analysis.
+      // Touch double taps are handled by word/position above. Ignore the later
+      // synthesized dblclick so a single gesture cannot start two requests.
       if(reader.pointActive)return;
       let chosen=selectedQuote();
       if(chosen) {
@@ -1969,11 +1982,15 @@ async function readingStatsPage(token) {
     for(const [key,value]of Object.entries(values))totals.querySelector(`[data-stat="${key}"]`).textContent=value;
     const signature=JSON.stringify(analytics);
     if(signature!==analyticsSignature){
-      const range=charts.querySelector('select')?.value;
+      const range=charts.querySelector('[aria-label="图表日期范围"]')?.value;
+      const sourceSelect=charts.querySelector('[aria-label="阅读来源统计范围"]');
+      const sourceMode=sourceSelect&&!sourceSelect.options[0].disabled?sourceSelect.value:null;
       const expanded=charts.querySelector('.reading-measurement-notes')?.open;
       chartPanel?.cleanup();chartPanel=readingAnalyticsPanel(analytics);
       charts.replaceChildren(chartPanel);analyticsSignature=signature;
-      if(range){const select=charts.querySelector('select');select.value=range;select.dispatchEvent(new Event('change'));}
+      if(range){const select=charts.querySelector('[aria-label="图表日期范围"]');select.value=range;select.dispatchEvent(new Event('change'));}
+      if(sourceMode){const select=charts.querySelector('[aria-label="阅读来源统计范围"]');
+        if(!select.querySelector(`option[value="${sourceMode}"]`).disabled){select.value=sourceMode;select.dispatchEvent(new Event('change'));}}
       if(expanded)charts.querySelector('.reading-measurement-notes').open=true;
     }
     render();

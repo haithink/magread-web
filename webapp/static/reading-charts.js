@@ -112,17 +112,31 @@ function readingAnalyticsPanel(analytics) {
   }
   const weekdays=node('div',{class:'heatmap-weekdays','aria-hidden':'true'},...['一','二','三','四','五','六','日'].map(day=>node('span',{},day)));
   calendar.append(node('div',{class:'heatmap-layout'},weekdays,cells),node('div',{class:'heatmap-legend'},'少',...[0,1,2,3,4].map(i=>node('span',{class:'heatmap-cell heat-level-'+i,'aria-hidden':'true'})),'多'),calendarDetail);
-  const sources=node('section',{class:'reading-chart-panel reading-source-distribution'},node('h3',{},'阅读来源分布'),
-    node('p',{class:'count'},'按已完成文章总词数统计；重复标题归入最早完成的出处，每篇只计一次。'));
-  const rows=analytics.sources.slice(0,5);
-  if(analytics.sources.length>5)rows.push({name:'其他',words:analytics.sources.slice(5).reduce((s,r)=>s+r.words,0),articleCount:analytics.sources.slice(5).reduce((s,r)=>s+r.articleCount,0)});
-  const max=Math.max(1,...rows.map(r=>r.words));
-  if(!rows.length)sources.append(node('p',{class:'muted'},'读完第一篇文章后显示来源分布。'));
-  for(const row of rows)sources.append(node('div',{class:'reading-source-row'},node('div',{},node('strong',{},row.name),node('span',{},`${row.articleCount} 篇 · ${fmt(row.words)} 词`)),
-    node('meter',{min:0,max,value:row.words,'aria-label':`${row.name}：${fmt(row.words)} 词`})));
+  const sourceMode=node('select',{'aria-label':'阅读来源统计范围'},
+    node('option',{value:'all'},'全部阅读（含未完成）'),node('option',{value:'completed'},'仅已完成'));
+  // Older offline snapshots contain completed sources only; label them accurately.
+  if(!analytics.readingSources){sourceMode.value='completed';sourceMode.options[0].disabled=true;}
+  const sourceDescription=node('p',{class:'count'}),sourceRows=node('div');
+  const sources=node('section',{class:'reading-chart-panel reading-source-distribution'},
+    node('div',{class:'analytics-section-heading'},node('h3',{},'阅读来源分布'),sourceMode),sourceDescription,sourceRows);
+  const drawSources=()=>{
+    const all=sourceMode.value==='all'&&!!analytics.readingSources;
+    const rows=all?analytics.readingSources:analytics.sources;
+    sourceDescription.textContent=all?'包含未完成文章的计时阅读估算；与累计实际阅读词数一致，完成后用全文词数替换。':'按已完成文章全文词数统计；重复标题归入最早完成的出处，每篇只计一次。';
+    sourceRows.replaceChildren();
+    const max=Math.max(1,...rows.map(r=>r.words));
+    if(!rows.length)sourceRows.append(node('p',{class:'muted'},all?'记录阅读词数或完成文章后显示来源分布。':'读完第一篇文章后显示来源分布。'));
+    for(const row of rows){
+      const counts=all?`已完成 ${row.completedArticleCount} 篇 · 未完成 ${row.unfinishedArticleCount} 篇`:`${row.articleCount} 篇`;
+      sourceRows.append(node('div',{class:'reading-source-row'},node('div',{},node('strong',{},row.name),node('span',{},`${counts} · ${fmt(row.words)} 词`)),
+        node('meter',{min:0,max,value:row.words,'aria-label':`${row.name}：${fmt(row.words)} 词`})));
+    }
+  };
+  sourceMode.addEventListener('change',drawSources);drawSources();
   extra.append(calendar,sources);root.append(extra);
   root.append(node('details',{class:'reading-measurement-notes'},node('summary',{},'阅读量和速度如何计算？'),
     node('p',{},'累计实际阅读词数（估算）＝已完成文章全文词数＋未读完文章的计时阅读估算，与图表日期范围无关。历史已读文章和 Chrome 同步完成记录也按全文计入；完成后用全文词数替换此前部分阅读量，不再重复叠加。已完成同标题各出处取最大全文词数；未完成同标题各出处取最大的累计计时词数。提前标记已读也按全文计算。'),
+    node('p',{},'来源分布默认包含未完成文章，统计全部历史，不受曲线日期范围影响。同标题未完成文章归入累计计时词数最多的出处，相同则取最早记录；完成后归入最早完成的出处，每篇只计一次。尚未产生计时词数的文章不会计入来源阅读量。'),
     node('p',{},'有效时长只累计前台且获得焦点的阅读页面；生成当前文章生词/短语、切换标签页、弹出查词/讲解窗口、手动暂停或 90 秒无操作会暂停。'),
     node('p',{},'计时阅读词数根据正文位置前进估算，不代表逐字阅读或理解；快速跳转不计词数。同一次阅读往回翻不重复计词，重新打开文章从头复读则计入当天阅读量。文章和每日速度均为计时词数除以有效分钟数，跨文章平均按总时间加权。'),
     node('p',{},'每日曲线及阅读速度继续使用原始计时采样，和累计阅读量的统计口径不同。历史文章或提前标记已读所计入的全文词数不会补算为计时样本、有效时长或速度。多窗口或多设备同时打开时，有效时长不重复累计。日期按当前设备的 UTC 偏移划分；午夜前后的计时会拆分到两天。')));

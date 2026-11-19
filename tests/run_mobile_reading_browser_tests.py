@@ -210,19 +210,30 @@ def main():
                 assert page.evaluate('state.selection.quote')=='candid'
                 page.get_by_role('button',name='关闭选词操作').tap()
                 assert page.evaluate("!CSS.highlights.has('kandu-touch-selection')")
-                # Repeated taps on an ordinary word keep its lookup available;
-                # neither touch taps nor a synthesized dblclick invoke the model.
+                # One tap keeps lookup available; a second tap explains precisely
+                # its containing sentence, without a duplicate from native dblclick.
                 calls_before=len(llm_calls)
-                point=tap_word(page,'uncertainties')
-                expect(page.locator('#selection-lookup')).to_be_visible()
-                assert len(llm_calls)==calls_before
+                point=word_point(page,'uncertainties',4)
+                page.evaluate("y=>scrollBy({top:y-innerHeight/2,behavior:'instant'})",point['y'])
+                snapshot(page)
+                point=word_point(page,'uncertainties',4,scroll=False)
                 page.touchscreen.tap(point['x'],point['y'])
                 expect(page.locator('#selection-lookup')).to_be_visible()
+                assert len(llm_calls)==calls_before
+                # The separate single-tap assertion must not consume the gesture interval.
+                page.get_by_role('button',name='关闭选词操作').tap()
+                page.touchscreen.tap(point['x'],point['y'])
+                page.touchscreen.tap(point['x'],point['y'])
+                expect(page.locator('#sheet-wait')).to_be_visible()
+                page.wait_for_function('() => state.activeJobs.size>0')
+                assert len(llm_calls)==calls_before+1
+                assert llm_calls[-1]['sentence']=='It certainly won’t paper over the uncertainties.'
                 page.locator('#para-4 p').dispatch_event('dblclick')
                 page.wait_for_timeout(100)
-                assert len(llm_calls)==calls_before
-                expect(page.locator('#sheet')).not_to_be_visible()
-                page.get_by_role('button',name='关闭选词操作').tap()
+                assert len(llm_calls)==calls_before+1
+                jobs['test']=dict(state='done',status='完成',result=dict(translation='这当然无法掩盖这些不确定性。'))
+                expect(page.locator('#sheet')).to_be_visible()
+                page.locator('#sheet-close').tap()
                 # Dialogs and inputs remain usable when a mobile keyboard shrinks the visual viewport.
                 page.get_by_role('button',name='与 AI 讨论',exact=True).tap()
                 input=page.get_by_role('textbox',name='向 AI 提问');input.fill('Why?')
