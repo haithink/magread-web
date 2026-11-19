@@ -113,7 +113,7 @@ function readingAnalyticsPanel(analytics) {
   const weekdays=node('div',{class:'heatmap-weekdays','aria-hidden':'true'},...['一','二','三','四','五','六','日'].map(day=>node('span',{},day)));
   calendar.append(node('div',{class:'heatmap-layout'},weekdays,cells),node('div',{class:'heatmap-legend'},'少',...[0,1,2,3,4].map(i=>node('span',{class:'heatmap-cell heat-level-'+i,'aria-hidden':'true'})),'多'),calendarDetail);
   const sources=node('section',{class:'reading-chart-panel reading-source-distribution'},node('h3',{},'阅读来源分布'),
-    node('p',{class:'count'},'按已读词数统计；重复标题归入最早完成的出处，每篇只计一次。'));
+    node('p',{class:'count'},'按已完成文章总词数统计；重复标题归入最早完成的出处，每篇只计一次。'));
   const rows=analytics.sources.slice(0,5);
   if(analytics.sources.length>5)rows.push({name:'其他',words:analytics.sources.slice(5).reduce((s,r)=>s+r.words,0),articleCount:analytics.sources.slice(5).reduce((s,r)=>s+r.articleCount,0)});
   const max=Math.max(1,...rows.map(r=>r.words));
@@ -122,9 +122,10 @@ function readingAnalyticsPanel(analytics) {
     node('meter',{min:0,max,value:row.words,'aria-label':`${row.name}：${fmt(row.words)} 词`})));
   extra.append(calendar,sources);root.append(extra);
   root.append(node('details',{class:'reading-measurement-notes'},node('summary',{},'阅读量和速度如何计算？'),
+    node('p',{},'累计实际阅读词数（估算）汇总全部已保存的计时阅读词数，包含未读完的文章，与图表选择的日期范围无关。已完成文章总词数在读到文末或标记已读后计入全文词数；提前标记已读不会把未阅读部分补入实际阅读估算。'),
     node('p',{},'有效时长只累计前台且获得焦点的阅读页面；生成当前文章生词/短语、切换标签页、弹出查词/讲解窗口、手动暂停或 90 秒无操作会暂停。'),
     node('p',{},'计时阅读词数根据正文位置前进估算，不代表逐字阅读或理解；快速跳转不计词数。同一次阅读往回翻不重复计词，重新打开文章从头复读则计入当天阅读量。文章和每日速度均为计时词数除以有效分钟数，跨文章平均按总时间加权。'),
-    node('p',{},'计时从本功能启用后开始。历史文章和 Chrome 同步记录没有可靠耗时，不补造速度。多窗口或多设备同时打开时，有效时长不重复累计。日期按当前设备的 UTC 偏移划分；午夜前后的计时会拆分到两天。')));
+    node('p',{},'计时从本功能启用后开始。历史文章和 Chrome 同步记录没有可靠计时采样，不补造实际阅读词数或速度。多窗口或多设备同时打开时，有效时长不重复累计。日期按当前设备的 UTC 偏移划分；午夜前后的计时会拆分到两天。')));
   const update=()=>{
     const days=analytics.daily.slice(-Number(range.value));
     const words=days.reduce((s,d)=>s+d.measuredWords,0),ms=days.reduce((s,d)=>s+d.activeMs,0);
@@ -134,7 +135,7 @@ function readingAnalyticsPanel(analytics) {
   range.addEventListener('change',update);
   // Draw after insertion so axes use the actual phone/desktop panel width.
   const observer=new ResizeObserver(update);observer.observe(chartGrid);
-  state.statsCleanup=()=>observer.disconnect();
+  root.cleanup=()=>observer.disconnect();
   requestAnimationFrame(update);
   return root;
 }

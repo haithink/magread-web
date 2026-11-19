@@ -1,0 +1,113 @@
+"""Partial reading and cached statistics with delayed outbox replies; no real data/LLM."""
+import os
+from pathlib import Path
+import threading
+import types
+from unittest.mock import patch
+
+from playwright.sync_api import sync_playwright, expect
+from werkzeug.serving import make_server
+
+from run_web_tests import WebTests, store, llm
+from webapp import reading_activity as activity, reading_stats
+import webapp.server as server_module
+
+
+def main():
+    WebTests.setUpClass()
+    article=dict(index=0,title='An unfinished reading experiment',paragraphs=['word '*100 for _ in range(20)])
+    store._atomic_json_write(store._cache_dir('sample')/'content.json',dict(
+        bookSize=WebTests.meta['size'],format='epub',articles=[article]))
+    now=[server_module.time.time_ns()//1_000_000]
+    fake_time=types.SimpleNamespace(time_ns=lambda:now[0]*1_000_000,time=lambda:now[0]/1000,
+        monotonic=server_module.time.monotonic)
+    errors=[]
+    with patch.object(activity,'time',fake_time),patch.object(server_module,'time',fake_time),\
+            patch.object(llm,'conversation',side_effect=AssertionError('No paid models')):
+        server=make_server('127.0.0.1',0,WebTests.app,threaded=True)
+        thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+        base=f'http://127.0.0.1:{server.server_port}'
+        try:
+            with sync_playwright() as p:
+                engine=os.environ.get('KANDU_TEST_ENGINE','chromium')
+                expect.set_options(timeout=30_000 if engine=='webkit' else 5000)
+                browser=getattr(p,engine).launch(headless=True,**(
+                    {'executable_path':os.environ['KANDU_TEST_CHROME']} if engine=='chromium' else {}))
+                for mobile in [False,True]:
+                    store.set_article_state('sample',0,'unread')
+                    reading_stats.mark_web(WebTests.meta,article,False)
+                    context=browser.new_context(viewport={'width':393 if mobile else 1440,'height':852 if mobile else 1000},
+                        is_mobile=mobile,has_touch=mobile,timezone_id='Asia/Shanghai')
+                    page=context.new_page();page.on('pageerror',lambda e:errors.append(str(e)))
+                    page.goto(base+'/#/reading-stats')
+                    page.locator('#password').fill(WebTests.authcode);page.locator('#login-form button').click()
+                    measured=page.locator('[data-stat="measured-words"]')
+                    before=activity.report([])['totals']['measuredWords']
+                    expect(measured).to_have_text(f'{before:,}')
+                    expect(page.locator('[data-stat="words"]')).to_have_text('0')
+                    expect(measured.locator('..')).to_contain_text('累计实际阅读词数（估算）')
+                    expect(page.locator('[data-stat="words"]').locator('..')).to_contain_text('已完成文章总词数')
+                    # Seed a real cache before reading, then hold the next clock
+                    # upload while opening statistics. A stale snapshot must
+                    # update after synchronization without a manual refresh.
+                    page.evaluate("location.hash='#/read/sample/0'")
+                    page.wait_for_function('() => state.reader?.clock?.lastQueued && ReadingSync.pending()===0')
+                    held=[];released=[False]
+                    def hold_clock(route):
+                        if released[0]:route.continue_()
+                        else:held.append(route)
+                    page.route('**/reading-time',hold_clock)
+                    now[0]+=30_000
+                    page.evaluate('''stamp => {
+                        ReadingSync.now=()=>stamp;
+                        state.reader.clock.elapsedMs=30000;
+                        flushReadingClock(state.reader,false,{paragraphIndex:1,paragraphOffset:0});
+                        location.hash='#/reading-stats';
+                    }''',now[0])
+                    expect(measured).to_have_text(f'{before:,}')
+                    expect(page.get_by_role('heading',name='已读统计',exact=True)).to_be_visible()
+                    page.get_by_role('searchbox',name='搜索已读文章').fill('keep my search')
+                    page.get_by_role('combobox',name='图表日期范围').select_option('7')
+                    expect(page.locator('[data-stat="articles"]')).to_have_text('0')
+                    page.wait_for_function('() => ReadingSync.pending()>0')
+                    assert held
+                    released[0]=True
+                    for route in held[:]:route.continue_()
+                    expect(measured).to_have_text(f'{before+100:,}')
+                    page.unroute('**/reading-time',hold_clock)
+                    expect(page.locator('[data-stat="words"]')).to_have_text('0')
+                    expect(page.get_by_role('searchbox',name='搜索已读文章')).to_have_value('keep my search')
+                    expect(page.get_by_role('combobox',name='图表日期范围')).to_have_value('7')
+                    expect(page.locator('#reading-cache-notice')).to_have_count(0)
+                    assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
+                    # An early completion changes only the completed-article metric.
+                    page.evaluate('''async () => {
+                        await api('/books/sample/state',{method:'POST',data:{articleIndex:0,state:'read'}});
+                    }''')
+                    page.reload()
+                    expect(page.locator('[data-stat="words"]')).to_have_text('2,000')
+                    expect(measured).to_have_text(f'{before+100:,}')
+                    expect(page.locator('[data-stat="articles"]')).to_have_text('1')
+                    if folder:=os.environ.get('KANDU_TEST_ARTIFACTS'):
+                        target=Path(folder);target.mkdir(parents=True,exist_ok=True)
+                        page.screenshot(path=str(target/('reading-totals-phone.png' if mobile else 'reading-totals-desktop.png')),full_page=True)
+                    # A late stats response after navigation must not replace the reader.
+                    delayed=[]
+                    page.route('**/api/reading-stats?*',lambda route:delayed.append(route))
+                    page.reload()
+                    expect(measured).to_have_text(f'{before+100:,}')
+                    page.evaluate("location.hash='#/read/sample/0'")
+                    expect(page.locator('#reader-reading-time')).to_be_visible()
+                    for route in delayed:route.continue_()
+                    expect(page.locator('[data-stat="measured-words"]')).to_have_count(0)
+                    context.close()
+                browser.close()
+            assert not errors,errors
+            print(f'READING TOTALS BROWSER PASS ({engine}): desktop + phone, partial reading, cached stats, delayed sync, preserved controls, early completion, route cleanup, no overflow/models')
+        finally:
+            server.shutdown();server.server_close();thread.join(timeout=5)
+            WebTests.tearDownClass()
+
+
+if __name__=='__main__':
+    main()

@@ -440,7 +440,7 @@ async function library(token) {
     button('＋ 添加刊物',uploadSheet,'primary')
   ]));
   content.append(el('a',{class:'reading-milestone',href:'#/reading-stats'},
-    el('div',{},el('span',{class:'eyebrow'},'EVERY ARTICLE COUNTS'),el('strong',{},`已读 ${stats.articleCount.toLocaleString()} 篇 · 累计 ${stats.totalWords.toLocaleString()} 词`)),
+    el('div',{},el('span',{class:'eyebrow'},'EVERY ARTICLE COUNTS'),el('strong',{},`已读 ${stats.articleCount.toLocaleString()} 篇 · 已完成文章共 ${stats.totalWords.toLocaleString()} 词`)),
     el('span',{},'查看阅读足迹 →')));
   if(data.recent.length) {
     const list=el('div',{class:'recent-grid',id:'recent-reading'});
@@ -1785,7 +1785,9 @@ function syncSettingsPanel(initial) {
 }
 
 async function readingStatsPage(token) {
-  const data=await api('/reading-stats?days=365&timezoneOffset='+new Date().getTimezoneOffset());if(token!==state.route)return;
+  const path='/reading-stats?days=365&timezoneOffset='+new Date().getTimezoneOffset();
+  let data,chartPanel,analyticsSignature='',refreshing=null,refreshQueued=false;
+  const controller=new AbortController();
   const search=el('input',{type:'search',class:'search',placeholder:'搜索标题、刊物或网站…','aria-label':'搜索已读文章'});
   const list=el('div',{class:'completed-list'}),count=el('span',{class:'count'});
   const render=()=>{
@@ -1805,17 +1807,51 @@ async function readingStatsPage(token) {
       '读到文章结尾或标记为已读，即可加入；Chrome 网页文章也可以同步到这里。'));
   };
   search.oninput=render;
-  const analytics=data.analytics,total=analytics.totals;
+  const metrics=[['measured-words','累计实际阅读词数（估算）'],['words','已完成文章总词数'],
+    ['articles','已读文章 · 按标题去重'],['active-time','有效阅读时长'],['speed','平均估算速度 · 按总时间加权'],
+    ['active-days','计时阅读天数'],['streak','当前连续阅读']];
+  const totals=el('div',{class:'reading-totals'},...metrics.map(([key,label])=>
+    el('div',{},el('strong',{'data-stat':key},'—'),el('span',{},label))));
+  const charts=el('div');
+  const applyData=value=>{
+    if(!value||token!==state.route||controller.signal.aborted)return;
+    data=value;
+    const analytics=data.analytics,total=analytics.totals;
+    const values={'measured-words':total.measuredWords.toLocaleString(),words:data.totalWords.toLocaleString(),
+      articles:data.articleCount.toLocaleString(),'active-time':readingDuration(total.activeMs),
+      speed:total.wordsPerMinute===null?'—':`${total.wordsPerMinute} 词/分`,
+      'active-days':`${analytics.activeDays} 天`,streak:`${analytics.currentStreak} 天`};
+    for(const [key,value]of Object.entries(values))totals.querySelector(`[data-stat="${key}"]`).textContent=value;
+    const signature=JSON.stringify(analytics);
+    if(signature!==analyticsSignature){
+      const range=charts.querySelector('select')?.value;
+      const expanded=charts.querySelector('.reading-measurement-notes')?.open;
+      chartPanel?.cleanup();chartPanel=readingAnalyticsPanel(analytics);
+      charts.replaceChildren(chartPanel);analyticsSignature=signature;
+      if(range){const select=charts.querySelector('select');select.value=range;select.dispatchEvent(new Event('change'));}
+      if(expanded)charts.querySelector('.reading-measurement-notes').open=true;
+    }
+    render();
+  };
+  // Show cached statistics immediately, then replace their values in place. Wait
+  // for any older GET before fetching after an outbox acknowledgement, so a
+  // pre-upload snapshot cannot leave the newly measured words invisible.
+  const refresh=()=>{
+    if(token!==state.route||controller.signal.aborted||ReadingSync.pending())return;
+    if(refreshing){refreshQueued=true;return;}
+    refreshing=(async()=>{
+      await cacheRequests.get(path)?.catch(()=>{});
+      if(token===state.route&&!controller.signal.aborted)applyData(await api(path,{fresh:true,onUpdate:applyData}));
+    })().catch(()=>{}).finally(()=>{refreshing=null;if(refreshQueued){refreshQueued=false;refresh();}});
+  };
+  window.addEventListener('reading-synced',refresh,{signal:controller.signal});
+  state.statsCleanup=()=>{controller.abort();chartPanel?.cleanup();};
+  const initial=await api(path,{onUpdate:applyData});if(token!==state.route)return;
   view.replaceChildren(heading('YOUR READING JOURNEY','已读统计','看见每天的积累，也看见阅读节奏的变化。'),
-    el('div',{class:'reading-totals'},el('div',{},el('strong',{'data-stat':'articles'},data.articleCount.toLocaleString()),el('span',{},'已读文章 · 按标题去重')),
-      el('div',{},el('strong',{'data-stat':'words'},data.totalWords.toLocaleString()),el('span',{},'累计已读词数')),
-      el('div',{},el('strong',{'data-stat':'active-time'},readingDuration(total.activeMs)),el('span',{},'有效阅读时长')),
-      el('div',{},el('strong',{'data-stat':'speed'},total.wordsPerMinute===null?'—':`${total.wordsPerMinute} 词/分`),el('span',{},'平均估算速度 · 按总时间加权')),
-      el('div',{},el('strong',{'data-stat':'active-days'},`${analytics.activeDays} 天`),el('span',{},'计时阅读天数')),
-      el('div',{},el('strong',{'data-stat':'streak'},`${analytics.currentStreak} 天`),el('span',{},'当前连续阅读'))),
-    el('p',{class:'count'},'标题忽略大小写、空白和标点差异；同标题各出处合并，词数取最大值，不重复累加。'),
-    readingAnalyticsPanel(analytics),
-    el('div',{class:'filters'},search,count),list);render();
+    totals,
+    el('p',{class:'count'},'实际阅读词数按计时期间正文位置前进估算，包含未读完的文章；阅读记录同步后自动更新。已完成文章总词数按全文计入，同标题去重后取最大值。'),
+    charts,el('div',{class:'filters'},search,count),list);
+  applyData(initial);ReadingSync.drain().catch(()=>{});
 }
 
 function editModel(initial) {

@@ -92,6 +92,28 @@ class ActivityTests(unittest.TestCase):
         self.assertEqual(capped.json['acceptedMs'],activity.MAX_INTERVAL_MS)
         self.assertEqual(activity.article_timing('sample',0)['activeMs'],150_000)
 
+    def test_partial_reading_totals_grow_independently_of_completion(self):
+        self.pulse()
+        for sequence,words in [(1,100),(2,200)]:
+            self.now+=30_000
+            self.pulse(sequence,sequence*30_000,words)
+            stats=self.report(days=7).json
+            self.assertEqual(stats['analytics']['totals']['measuredWords'],words)
+            self.assertEqual(sum(day['measuredWords'] for day in stats['analytics']['daily']),words)
+            self.assertEqual(stats['articleCount'],0)
+            self.assertEqual(stats['totalWords'],0)
+        # Completing early credits the full article only to the completion metric.
+        self.post('/books/sample/state',dict(articleIndex=0,state='read'))
+        stats=self.report().json
+        self.assertEqual(stats['articleCount'],1)
+        self.assertEqual(stats['totalWords'],2000)
+        self.assertEqual(stats['analytics']['totals']['measuredWords'],200)
+        # Removing a completion does not remove the reading already measured.
+        self.post('/books/sample/state',dict(articleIndex=0,state='unread'))
+        stats=self.report().json
+        self.assertEqual(stats['totalWords'],0)
+        self.assertEqual(stats['analytics']['totals']['measuredWords'],200)
+
     def test_returning_to_previous_paragraph_does_not_count_same_words_again(self):
         self.pulse()
         for sequence,words in [(1,100),(2,50),(3,120)]:
