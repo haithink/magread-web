@@ -603,14 +603,25 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare
     def read(book_id, index):
         meta, art = article(book_id, index)
         summary = next((a for a in (store.load_digest(book_id) or {}).get('articles', []) if a['index'] == index), {})
+        history = store.load_reading_history(book_id).get(str(index))
         return jsonify(article=art, titleZh=summary.get('titleZh', ''), summaryZh=summary.get('summaryZh', ''),
             contentVersion=content_version(art),
-            bookTitle=meta.get('title') or meta['fileName'], ext=meta['ext'], history=store.load_reading_history(book_id).get(str(index)),
+            bookTitle=meta.get('title') or meta['fileName'], ext=meta['ext'], history=history,
+            progressServerAt=(history or {}).get('lastReadAt', 0),
             sourceUrl=meta.get('sourceUrl', ''), excerpted=bool((store.load_digest(book_id) or {}).get('excerpted')),
             parentBookId=podcast_library.parent_id(meta),
             readingTiming=reading_activity.article_timing(book_id,index),
             wordCount=len(gen._TOKEN.findall(' '.join(art['paragraphs']))),
             state=store.load_article_states(book_id).get(str(index), 'unread'))
+
+    @app.get('/api/books/<book_id>/articles/<int:index>/progress')
+    def read_progress(book_id, index):
+        _, art = article(book_id, index)
+        with data_lock:
+            history = store.load_reading_history(book_id).get(str(index))
+            state = store.load_article_states(book_id).get(str(index), 'unread')
+        # A small uncached response; polling never downloads prose or vocabulary.
+        return jsonify(record=history, state=state, contentVersion=content_version(art))
 
     @app.post('/api/books/<book_id>/articles/<int:index>/reading-time')
     def reading_time(book_id,index):
@@ -632,14 +643,25 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare
         progress = (sum(len(p) for p in art['paragraphs'][:para]) + offset) / max(1, sum(len(p) for p in art['paragraphs']))
         with data_lock:
             previous = store.load_reading_history(book_id).get(str(index), {})
+            based_on = data.get('basedOnReadAt')
+            if based_on is not None:
+                if type(based_on) is not int or based_on < 0:
+                    abort(400, '阅读记录基准无效')
+                if based_on != previous.get('lastReadAt', 0):
+                    return jsonify(record=previous, accepted=False)
             observed = data.get('observedAt')
             if observed is not None:
                 now = int(time.time()*1000)
                 if type(observed) is not int or not now-7*86_400_000 <= observed <= now+30_000:
                     abort(400, '阅读记录时间无效或已超过七天')
                 observed = min(observed, now)
-                if observed < previous.get('lastReadAt', 0):
+                if based_on is None and observed < previous.get('lastReadAt', 0):
                     return jsonify(record=previous, accepted=False)
+                if based_on is not None:
+                    # A matching baseline proves causal order even when devices'
+                    # clock estimates differ due to latency. Keep the revision
+                    # strictly increasing, including two updates in the same ms.
+                    observed = max(observed, previous.get('lastReadAt', 0) + 1)
             record = store.save_reading_progress(book_id, index, dict(title=art['title'], titleZh='',
                 paragraphIndex=para, paragraphOffset=offset, paragraphCount=len(art['paragraphs']),
                 paragraphStart=art['paragraphs'][para][:100], wordCount=len(gen._TOKEN.findall(' '.join(art['paragraphs']))),

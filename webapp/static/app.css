@@ -100,6 +100,8 @@ body:has(#sheet-wait:not([hidden])) #jobbar{display:none}
   .site-footer{padding-bottom:calc(20px + env(safe-area-inset-bottom))}
 }
 @media(max-width:600px) and (pointer:coarse), (pointer:coarse) and (max-width:1000px) and (max-height:500px){.reader-options .touch-mode-toggle{display:flex;grid-column:span 2}}
+.reader-remote-progress{position:fixed;z-index:23;left:50%;bottom:calc(18px + env(safe-area-inset-bottom));transform:translateX(-50%);width:max-content;max-width:calc(100vw - 32px);box-sizing:border-box;display:flex;align-items:center;gap:16px;padding:12px 16px;background:var(--card);border:1px solid #cdd9c5;border-radius:12px;box-shadow:0 6px 24px #183f3526;font:13px/1.6 var(--sans)}.reader-remote-progress .row{gap:8px}.reader-remote-progress button{white-space:nowrap}body:has(#sheet[open]) .reader-remote-progress{visibility:hidden}
+@media(max-width:600px){.reader-remote-progress{width:calc(100vw - 24px);max-width:none;flex-wrap:wrap;gap:8px;padding:12px}.reader-remote-progress .row{width:100%}.reader-remote-progress button{min-height:44px;flex:1}}
 .hover-actions{flex-wrap:wrap;gap:8px}
 @media(pointer:coarse){.vocab-hover .hover-actions button{min-height:44px;font-size:13px}.vocab-hover .hover-sense{display:block}.vocab-hover{touch-action:pan-y}}
 @media(prefers-reduced-motion:reduce){html,.discussion-list{scroll-behavior:auto}*,*::before,*::after{transition:none!important;animation-duration:.01ms!important;animation-iteration-count:1!important}}

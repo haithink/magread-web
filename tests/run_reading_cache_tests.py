@@ -58,6 +58,48 @@ class CacheTests(ActivityTests):
         self.assertEqual(response.json['totalActiveMs'],120_000)
         self.assertEqual(self.post(endpoint,dict(sample,sequence=5,sampledAt=self.now+60_000)).status_code,400)
 
+    def test_live_progress_is_small_private_and_does_not_write(self):
+        endpoint='/api/books/sample/articles/0/progress'
+        self.assertEqual(self.app.test_client().get(endpoint).status_code,401)
+        initial=self.client.get(endpoint)
+        self.assertEqual(initial.status_code,200)
+        self.assertEqual(initial.headers['Cache-Control'],'no-store')
+        self.assertIsNone(initial.json['record'])
+        self.assertNotIn('article',initial.json)
+        self.assertNotIn('word '*20,initial.text)
+        saved=self.post('/books/sample/articles/0/progress',dict(paragraphIndex=8,paragraphOffset=35)).json['record']
+        snapshot=self.client.get(endpoint).json
+        self.assertEqual(snapshot['record'],saved)
+        self.assertEqual(snapshot['contentVersion'],self.client.get('/api/books/sample/articles/0').json['contentVersion'])
+        self.assertEqual(store_history(self),saved)
+
+    def test_active_old_device_cannot_overwrite_a_new_progress_until_resolved(self):
+        import time
+        endpoint='/books/sample/articles/0/progress'
+        stamp=int(time.time()*1000)-60_000
+        first=self.post(endpoint,dict(paragraphIndex=2,paragraphOffset=0,observedAt=stamp,basedOnReadAt=0)).json['record']
+        pc=self.post(endpoint,dict(paragraphIndex=8,paragraphOffset=30,observedAt=stamp+20_000,
+                                  basedOnReadAt=first['lastReadAt'])).json['record']
+        # A stale phone makes a new observation with a later timestamp, rather
+        # than an old offline replay. It must still leave the PC position intact.
+        old=self.post(endpoint,dict(paragraphIndex=3,paragraphOffset=0,observedAt=stamp+40_000,
+                                   basedOnReadAt=first['lastReadAt']))
+        self.assertFalse(old.json['accepted'])
+        self.assertEqual(old.json['record'],pc)
+        self.assertEqual(store_history(self),pc)
+        # Explicitly choosing to keep reading here acknowledges the remote base.
+        chosen=self.post(endpoint,dict(paragraphIndex=3,paragraphOffset=0,observedAt=stamp+45_000,
+                                      basedOnReadAt=pc['lastReadAt']))
+        self.assertNotEqual(chosen.json.get('accepted'),False)
+        self.assertEqual(store_history(self)['paragraphIndex'],3)
+        # Acknowledged remote progress establishes order even if the phone's
+        # server-time estimate lags the PC's because its login reply was slow.
+        behind=self.post(endpoint,dict(paragraphIndex=4,paragraphOffset=0,observedAt=stamp+35_000,
+                                      basedOnReadAt=chosen.json['record']['lastReadAt']))
+        self.assertNotEqual(behind.json.get('accepted'),False)
+        self.assertGreater(behind.json['record']['lastReadAt'],chosen.json['record']['lastReadAt'])
+        self.assertEqual(self.post(endpoint,dict(paragraphIndex=0,basedOnReadAt=True)).status_code,400)
+
 
 def store_history(test):
     return test.client.get('/api/books/sample/articles/0').json['history']

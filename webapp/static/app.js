@@ -69,7 +69,7 @@ const cacheRequests=new Map();let cacheEpoch=0;
 const cacheable=path=>/^\/(library|reading-stats)(\?|$)/.test(path)||/^\/books\/[^/]+(?:\/articles\/\d+(?:\/vocab)?)?$/.test(path);
 const articleGroup=path=>path.match(/^\/books\/[^/]+\/articles\/\d+/)?.[0]||'';
 function cacheComparable(path,value){
-  if(articleGroup(path)===path){const {history,readingTiming,state,...content}=value;return JSON.stringify(content);}
+  if(articleGroup(path)===path){const {history,progressServerAt,readingTiming,state,...content}=value;return JSON.stringify(content);}
   return JSON.stringify(value);
 }
 function cacheNotice(message,refresh=true){
@@ -215,6 +215,13 @@ const ReadingSync=(()=>{
         }
         if(owner!==epoch)return;
         items=items.filter(i=>i.id!==item.id);acknowledge(item);persist();
+        if(item.path.endsWith('/progress')&&result.accepted!==false){
+          // Offline samples from this journal form one causal chain. Advance only
+          // our own queued baseline; another tab/device must resolve its conflict.
+          for(const next of items)if(next.path===item.path&&next.journal===item.journal&&
+            next.data.basedOnReadAt===item.data.basedOnReadAt)next.data.basedOnReadAt=result.record.lastReadAt;
+          persist();
+        }
         window.dispatchEvent(new CustomEvent('reading-synced',{detail:{...item,result}}));
       }
     })().finally(()=>{running=null;});
@@ -231,8 +238,8 @@ async function initReadingStorage(identity){
 }
 const cacheAuth=typeof BroadcastChannel==='function'?new BroadcastChannel('kandu-reading-auth'):null;
 cacheAuth?.addEventListener('message',event=>{if(event.data==='logout'&&state.csrf){state.csrf='';cacheEpoch++;cacheRequests.clear();localReading.clear();ReadingSync.reset();ReadingCache.clear();showLogin();}});
-window.addEventListener('online',()=>{ReadingSync.drain().catch(()=>{});if(state.reader)loadVocab(state.reader,{fresh:true}).catch(()=>{});});
-setInterval(()=>{if(state.csrf)ReadingSync.drain().catch(()=>{});},15_000);
+window.addEventListener('online',()=>{ReadingSync.drain().catch(()=>{});refreshRemoteProgress();if(state.reader)loadVocab(state.reader,{fresh:true}).catch(()=>{});});
+setInterval(()=>{if(state.csrf){ReadingSync.drain().catch(()=>{});refreshRemoteProgress();}},15_000);
 function action(callback) { return (...args) => { if(args[0]?.type==='submit')args[0].preventDefault();return Promise.resolve().then(() => callback(...args)).catch(error => toast(error.message)); }; }
 function empty(title, text='') { return el('div', {class:'empty'}, el('h2', {}, title), el('p', {}, text)); }
 function heading(kicker, title, subtitle, actions=[]) {
@@ -707,6 +714,7 @@ function progressStatus(reader,text) {
   if(state.reader===reader&&$('#reader-save-state'))$('#reader-save-state').textContent=text;
 }
 function saveProgress(keepalive=false,reader=state.reader) {
+  if(reader?.remoteProgress||reader?.restoringProgress)return Promise.resolve();
   const position=currentPosition(reader);if(!position)return Promise.resolve();
   const key=JSON.stringify(position);if(reader.lastPosition===key)return Promise.resolve();
   reader.lastPosition=key;
@@ -716,20 +724,94 @@ function saveProgress(keepalive=false,reader=state.reader) {
     paragraphCount:reader.article.paragraphs.length,wordCount:reader.wordCount,contentVersion:reader.contentVersion,progress,atStart:progress===0,atEnd:progress>=.995};
   reader.history=record;localReading.set(path,record);
   updateCachedHistory(path,record);
-  ReadingSync.add(path+'/progress',{...position,observedAt,contentVersion:reader.contentVersion});
+  ReadingSync.add(path+'/progress',{...position,observedAt,basedOnReadAt:reader.progressServerAt||0,contentVersion:reader.contentVersion});
   progressStatus(reader,'本机已保存 · 待同步');
   return ReadingSync.drain().catch(()=>{progressStatus(reader,'本机已保存 · 待同步');});
 }
 const localReading=new Map();
-async function updateCachedHistory(path,history){
+async function updateCachedHistory(path,history,progressServerAt){
   const record=await ReadingCache.get(path);
-  if(record)await ReadingCache.put(path,{...record.value,history},{...record,checked:0});
+  if(record)await ReadingCache.put(path,{...record.value,history,
+    ...(progressServerAt===undefined?{}:{progressServerAt})},{...record,checked:0});
+}
+function progressOffset(reader,position){
+  return (reader.paragraphOffsets[position.paragraphIndex]||0)+(position.paragraphOffset||0);
+}
+function receiveRemoteProgress(reader,record){
+  if(state.reader!==reader||!record||!Number.isInteger(record.paragraphIndex)||record.paragraphIndex>=reader.paragraphNodes.length)return;
+  if(record.lastReadAt<(reader.progressServerAt||0))return;
+  reader.progressServerAt=record.lastReadAt;
+  reader.history=record;localReading.set(baseFor(reader),record);
+  updateCachedHistory(baseFor(reader),record,record.lastReadAt);
+  const position=currentPosition(reader);
+  const notice=$('#reader-remote-progress');
+  if(!position||progressOffset(reader,record)<=progressOffset(reader,position)){
+    reader.remoteProgress=null;notice.hidden=true;return;
+  }
+  reader.remoteProgress=record;
+  $('#remote-progress-label',notice).textContent=`其他设备已读到第 ${record.paragraphIndex+1} 段 · ${Math.floor(record.progress*100)}%`;
+  notice.hidden=false;
+  progressStatus(reader,'发现其他设备的新进度');
+}
+async function refreshRemoteProgress(reader=state.reader){
+  if(!reader?.ready||state.reader!==reader||!state.csrf||document.hidden||navigator.onLine===false)return;
+  if(reader.progressChecking)return reader.progressChecking;
+  const pending=(async()=>{
+    try{
+      const response=await networkApi(baseFor(reader)+'/progress');
+      if(state.reader!==reader)return;
+      if(response.contentVersion!==reader.contentVersion){cacheNotice('文章正文已更新，刷新后再同步其他设备的进度。');return;}
+      if(response.state!==reader.state)setReaderState(reader,response.state);
+      if(response.record&&response.record.lastReadAt>(reader.progressServerAt||0))receiveRemoteProgress(reader,response.record);
+    }catch{} // Keep local reading usable while the tunnel or server is unavailable.
+  })();
+  reader.progressChecking=pending;
+  try{await pending;}finally{if(reader.progressChecking===pending)reader.progressChecking=null;}
+}
+async function resumeRemoteProgress(reader){
+  const record=reader.remoteProgress;if(!record||state.reader!==reader)return;
+  const manualPaused=reader.clock?.manualPaused;
+  // End this pass at the current position. The remote jump is the baseline of a
+  // new pass, so skipped text never becomes measured reading volume or speed.
+  readingClockTick(reader);flushReadingClock(reader);stopReadingClock(reader,false);
+  if(reader.clock)reader.readingTiming={...reader.readingTiming,
+    activeMs:reader.clock.serverMs+Math.max(0,reader.clock.elapsedMs-reader.clock.syncedElapsed)};
+  reader.hoverHide?.();clearReaderSelection(reader,true);
+  clearTimeout(progressTimer);reader.restoringProgress=true;reader.remoteProgress=null;
+  $('#reader-remote-progress').hidden=true;
+  const node=reader.paragraphNodes[record.paragraphIndex],p=$('p',node);
+  const fraction=Math.min(1,record.paragraphOffset/Math.max(1,reader.article.paragraphs[record.paragraphIndex].length));
+  const place=()=>{
+    const top=$('.reader-toolbar').getBoundingClientRect().bottom,rect=p.getBoundingClientRect();
+    scrollTo({top:scrollY+rect.top+rect.height*fraction-top,behavior:'instant'});
+  };
+  place();
+  await new Promise(requestAnimationFrame);
+  if(state.reader!==reader)return;
+  // Leaving the page header pins the sticky toolbar at a different height.
+  // Recompute once after that transition so the in-paragraph offset is retained.
+  place();
+  await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+  if(state.reader!==reader)return;
+  reader.restoringProgress=false;reader.lastPosition=JSON.stringify(currentPosition(reader));
+  startReadingClock(reader,currentPosition(reader));
+  reader.clock.manualPaused=manualPaused;updateReadingClockControl(reader);updateReaderProgress(reader);
+  progressStatus(reader,'已接续其他设备的阅读进度');
 }
 window.addEventListener('reading-synced',event=>{
   const {path,data,result}=event.detail,reader=state.reader;
   if(path.endsWith('/progress')){
     const base=path.slice(0,-'/progress'.length),local=localReading.get(base);
-    if(!local||result.record.lastReadAt>=local.lastReadAt){const history={...local,...result.record};localReading.set(base,history);updateCachedHistory(base,history);}
+    if(!local||result.accepted===false||result.record.lastReadAt>=local.lastReadAt){const history={...local,...result.record};localReading.set(base,history);updateCachedHistory(base,history,result.record.lastReadAt);}
+    if(reader&&baseFor(reader)===base){
+      if(result.accepted===false)receiveRemoteProgress(reader,result.record);
+      else{
+        reader.progressServerAt=Math.max(reader.progressServerAt||0,result.record.lastReadAt);
+        if(reader.remoteProgress&&reader.remoteProgress.lastReadAt<=result.record.lastReadAt){
+          reader.remoteProgress=null;$('#reader-remote-progress').hidden=true;
+        }
+      }
+    }
     if(reader&&baseFor(reader)===base&&reader.lastPosition===JSON.stringify({paragraphIndex:data.paragraphIndex,paragraphOffset:data.paragraphOffset})){
       progressStatus(reader,result.accepted===false?'服务器有较新的阅读位置':'已同步');
     }
@@ -1201,16 +1283,23 @@ function positionSelectionBar(reader) {
 }
 async function readerPage(bookId,index,token,startParagraph=null) {
   const data=await api(`/books/${encodeURIComponent(bookId)}/articles/${index}`);if(token!==state.route)return;
+  const progressServerAt=data.progressServerAt??data.history?.lastReadAt??0;
   const path=`/books/${encodeURIComponent(bookId)}/articles/${index}`;
   const queued=ReadingSync.entries().filter(item=>item.path===path+'/progress').at(-1);
   const local=localReading.get(path);
   if(local&&(!local.contentVersion||local.contentVersion===data.contentVersion)&&local.lastReadAt>=(data.history?.lastReadAt||0))data.history=local;
   if(queued&&(!queued.data.contentVersion||queued.data.contentVersion===data.contentVersion)&&queued.data.observedAt>=(data.history?.lastReadAt||0))data.history={...queued.data,lastReadAt:queued.data.observedAt,atStart:queued.data.paragraphIndex===0&&queued.data.paragraphOffset===0};
-  const reader={...data,bookId,index,ready:false,vocab:null,fontSize:Number(localStorage.getItem('kandu-font')||21),
+  const reader={...data,bookId,index,progressServerAt,ready:false,vocab:null,fontSize:Number(localStorage.getItem('kandu-font')||21),
     vocabHighlightEnabled:localStorage.getItem('kandu-vocab-highlight')!=='off'};state.reader=reader;
   reader.paragraphOffsets=[];reader.totalCharacters=0;
   for(const paragraph of data.article.paragraphs){reader.paragraphOffsets.push(reader.totalCharacters);reader.totalCharacters+=paragraph.length;}
   const article=el('article',{class:'reader'});
+  const remoteProgress=el('aside',{id:'reader-remote-progress',class:'reader-remote-progress',role:'status',hidden:true},
+    el('span',{id:'remote-progress-label'}),el('div',{class:'row'},
+      button('继续到新进度',action(()=>resumeRemoteProgress(reader)),'primary'),
+      button('保持当前位置',action(async()=>{
+        reader.remoteProgress=null;remoteProgress.hidden=true;reader.lastPosition=null;await saveProgress(false,reader);
+      }))));
   const progress=el('div',{class:'reader-position'},el('div',{class:'reader-position-labels'},
     el('strong',{id:'reader-percentage'},'阅读进度 0%'),el('span',{id:'reader-paragraph'},`第 1 / ${data.article.paragraphs.length} 段`),
     el('span',{id:'reader-word-count'},`共 ${data.wordCount.toLocaleString()} 词`),
@@ -1297,7 +1386,7 @@ async function readerPage(bookId,index,token,startParagraph=null) {
       el('span',{},`${data.article.paragraphs.length} 段`)),
     data.sourceUrl?el('a',{class:'duplicate-source',href:data.sourceUrl,target:'_blank',rel:'noopener noreferrer'},'官方 Transcript ↗'):null,
     data.summaryZh?el('details',{class:'reader-summary'},el('summary',{},data.excerpted?'整期摘要 · 全文分段摘录':'文章摘要'),el('p',{},data.summaryZh)):null),
-    el('p',{class:'touch-reading-help',id:'touch-reading-help'}),selection,body);
+    el('p',{class:'touch-reading-help',id:'touch-reading-help'}),selection,body,remoteProgress);
   view.replaceChildren(article);window.scrollTo(0,0);
   installVocabHover(reader,article);
   installTouchReading(reader,body,pointToggle);
@@ -1319,11 +1408,13 @@ async function readerPage(bookId,index,token,startParagraph=null) {
   readerScroll=()=>{
     if(state.reader!==reader)return;
     if(!progressFrame)progressFrame=requestAnimationFrame(()=>{progressFrame=null;updateReaderProgress(reader);positionSelectionBar(reader);});
+    if(reader.restoringProgress)return;
     progressStatus(reader,'阅读中');clearTimeout(progressTimer);progressTimer=setTimeout(()=>saveProgress(),850);
   };
   window.addEventListener('scroll',readerScroll,{passive:true});
   // Record this article in recent reading even if the user stays at its beginning.
   saveProgress();
+  refreshRemoteProgress(reader);
   await loadVocab(reader);
 }
 function resizeReader(reader,delta){reader.hoverHide?.();reader.fontSize=Math.max(16,Math.min(30,reader.fontSize+delta));$('#reader-body').style.setProperty('--reading-size',reader.fontSize+'px');localStorage.setItem('kandu-font',reader.fontSize);updateReaderProgress(reader);}
@@ -1787,5 +1878,7 @@ async function route({refresh=false}={}) {
 }
 window.addEventListener('hashchange',route);
 window.addEventListener('pagehide',()=>{readingClockTick();flushReadingClock(state.reader,true);saveProgress(true);});
-document.addEventListener('visibilitychange',()=>{readingClockTick();if(document.hidden){flushReadingClock(state.reader,true);saveProgress(true);}else if(state.reader?.clock)state.reader.clock.lastInteraction=performance.now();});
+document.addEventListener('visibilitychange',()=>{readingClockTick();if(document.hidden){flushReadingClock(state.reader,true);saveProgress(true);}else{if(state.reader?.clock)state.reader.clock.lastInteraction=performance.now();refreshRemoteProgress();}});
+window.addEventListener('focus',()=>refreshRemoteProgress());
+window.addEventListener('pageshow',()=>refreshRemoteProgress());
 (async()=>{try{const session=await api('/session');if(session.authenticated){state.csrf=session.csrf;await initReadingStorage(session);await route();}else{ReadingSync.reset();await ReadingCache.init('');await ReadingCache.clear();showLogin();}}catch(error){view.replaceChildren(empty('连接服务器失败',error.message));}})();
