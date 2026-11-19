@@ -1,4 +1,4 @@
-"""Long podcast-sized reading: highlights, asynchronous analysis and modal touch."""
+"""Long podcast: continuous reading, bounded highlights and asynchronous analysis."""
 import os
 from pathlib import Path
 import threading
@@ -48,12 +48,43 @@ def main():
             page.locator('#login-form button').click()
             page.wait_for_function('() => state.reader?.ready&&state.reader.vocab', timeout=45000)
             print('LONG READY', flush=True)
+            assert page.evaluate('state.reader.hoverWords.size') == 782
+            # All source words remain indexed, but only nearby paragraphs are
+            # handed to the renderer. Exercise scroll jumps, continuous scroll,
+            # changing browser toolbar height and landscape before any AI call.
+            for width, height in [(393, 662), (393, 852), (720, 350)]:
+                page.set_viewport_size(dict(width=width, height=height))
+                for paragraph in [0, 89, 90, 180, 400, 780, 90]:
+                    page.evaluate('(i) => {document.querySelector(`#para-${i}`).scrollIntoView();scrollBy(0,-160);}', paragraph)
+                    page.wait_for_timeout(80)
+                    for _ in range(3):
+                        page.evaluate('() => scrollBy(0,100)')
+                        page.wait_for_timeout(40)
+                    snapshot = page.evaluate('''() => {
+                        const reader=state.reader,highlight=CSS.highlights.get('kandu-vocabulary');
+                        const active=new Set([...highlight].map(r=>Number(r.startContainer.parentElement.closest('.paragraph').dataset.index)));
+                        const toolbar=document.querySelector('.reader-toolbar').getBoundingClientRect().bottom;
+                        const visible=reader.paragraphNodes.filter(n=>{const r=n.querySelector('p').getBoundingClientRect();return r.bottom>toolbar&&r.top<innerHeight;});
+                        return {ranges:highlight.size,window:reader.vocabHighlightWindow,
+                            visible:visible.map(n=>Number(n.dataset.index)),active:[...active],
+                            text:document.querySelector(`#para-${reader.vocabHighlightWindow.start} p`).textContent};
+                    }''')
+                    assert 0 < snapshot['ranges'] < 300, snapshot
+                    assert snapshot['window']['end'] - snapshot['window']['start'] < 20, snapshot
+                    assert snapshot['visible'] and set(snapshot['visible']) <= set(snapshot['active']), snapshot
+                    assert snapshot['text'] == PARAGRAPHS[snapshot['window']['start']]
+                    if paragraph == 90 and (directory := os.environ.get('KANDU_TEST_ARTIFACTS')):
+                        folder = Path(directory)
+                        folder.mkdir(parents=True, exist_ok=True)
+                        page.screenshot(path=str(folder / f'long-reader-scroll-{engine}-{width}-{height}.png'))
+            page.set_viewport_size(dict(width=393, height=662))
+            print('CONTINUOUS SCROLL PASS: all visible paragraphs highlighted, fewer than 300 active ranges', flush=True)
             # Read well below the fold, then request a native-selected sentence.
             page.evaluate("() => {document.querySelector('#para-80').scrollIntoView();scrollBy(0,-260);}")
             page.wait_for_timeout(300)
             before = page.evaluate('scrollY')
             ranges = page.evaluate("CSS.highlights.get('kandu-vocabulary')?.size||0")
-            assert ranges > 9000, ranges
+            assert 0 < ranges < 300, ranges
             page.evaluate("window.longHighlight=CSS.highlights.get('kandu-vocabulary')")
             print('HIGHLIGHTS', ranges, flush=True)
             page.evaluate('''() => {
@@ -111,10 +142,19 @@ def main():
             assert page.evaluate("CSS.highlights.get('kandu-vocabulary').size") < ranges
             assert page.evaluate("CSS.highlights.get('kandu-vocabulary')!==longHighlight")
             assert abs(page.evaluate('scrollY') - before) < 3
+            # A viewport change while the modal is open must rebuild the nearby
+            # window, rather than restore ranges from the previous viewport.
+            page.locator('#badge-80').tap()
+            page.set_viewport_size(dict(width=720, height=350))
+            page.evaluate('() => document.querySelector("#para-500").scrollIntoView()')
+            page.locator('#sheet-close').tap()
+            page.wait_for_function("() => CSS.highlights.has('kandu-vocabulary')")
+            assert page.evaluate('state.reader.vocabHighlightWindow.start') > 480
+            assert page.evaluate("CSS.highlights.get('kandu-vocabulary').size") < 300
             assert not errors, errors
             context.close()
             browser.close()
-            print(f'LONG READING PASS: {engine}, 781 paragraphs, thousands of words/highlights, analysis, modal close, position and blocked cache.', flush=True)
+            print(f'LONG READING PASS: {engine}, 781 paragraphs, 9372 source matches, bounded painting, continuous scroll, resize, analysis, modal close, position and blocked cache.', flush=True)
     finally:
         server.shutdown()
         server.server_close()

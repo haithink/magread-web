@@ -75,7 +75,7 @@ body:has(#sheet-wait:not([hidden])) #jobbar{display:none}
   .tabs{gap:3px}.tabs button{padding:8px 10px}.filters{gap:10px}.filters .search{min-width:0;width:100%}
   .card-bottom{flex-wrap:wrap}.card-bottom select{font-size:14px;min-height:44px}.card-bottom a{display:inline-flex;align-items:center}.article-card{padding:18px}.article-card h2{font-size:22px}.article-card p{font-size:14px;line-height:1.8}
   .back{display:inline-flex;align-items:center;margin-bottom:10px}.digest-head h1{font-size:27px}
-  .reader-toolbar{padding:6px 0 8px;gap:0;top:env(safe-area-inset-top);margin-bottom:22px}
+  .reader-toolbar{padding:6px 0 8px;gap:0;top:env(safe-area-inset-top);margin-bottom:22px;background:#f9f7f1;backdrop-filter:none}
   .reader-primary{display:grid;grid-template-columns:auto minmax(0,1fr) auto auto;align-items:stretch;width:100%;gap:4px}
   .reader-primary button,.reader-primary a{font-size:12px;padding:8px 7px;min-height:46px;display:flex;align-items:center;justify-content:center;min-width:0;border-radius:8px;line-height:1.4}
   .reader-primary #vocab-button{overflow-wrap:anywhere}.reader-more-toggle{display:block}.reader-more-toggle[aria-expanded="true"]{background:#e7ecdf}

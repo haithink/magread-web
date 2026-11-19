@@ -13,7 +13,7 @@ EVENTS = frozenset(('analysis.start', 'analysis.cache-read', 'analysis.cache-rea
     'analysis.cache-saved', 'analysis.render', 'analysis.rendered', 'analysis.failure',
     'sheet.center', 'sheet.centered', 'sheet.dock', 'sheet.docked', 'sheet.finish',
     'sheet.close', 'sheet.closed', 'sheet.pointer', 'sheet.click', 'sheet.native-close',
-    'wait.heartbeat', 'page.visibility', 'page.resume', 'page.error', 'page.rejection'))
+    'wait.heartbeat', 'page.visibility', 'page.resume', 'page.error', 'page.rejection', 'page.reading'))
 ERRORS = frozenset(('Error', 'TypeError', 'RangeError', 'ReferenceError', 'SyntaxError',
     'InvalidStateError', 'AbortError', 'QuotaExceededError', 'SecurityError',
     'NotFoundError', 'UnknownError', 'TransactionInactiveError', 'TimeoutError'))
@@ -30,7 +30,7 @@ def clean_event(value):
         if isinstance(value.get(key), str) and re.fullmatch(pattern, value[key]):
             result[key] = value[key]
     for key in ('elapsedMs', 'sequence', 'sheet', 'width', 'height', 'visualHeight',
-                'scrollY', 'activeJobs', 'polls', 'line', 'column', 'gapMs', 'highlightRanges'):
+                'scrollY', 'activeJobs', 'polls', 'line', 'column', 'gapMs', 'highlightRanges', 'highlightParagraphs'):
         number = value.get(key)
         if type(number) in (int, float) and 0 <= number <= 10**10:
             result[key] = round(number)

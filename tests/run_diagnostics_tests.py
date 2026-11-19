@@ -59,6 +59,12 @@ class DiagnosticTests(unittest.TestCase):
         self.assertTrue(row['modalHighlightsSuspended'])
         self.assertNotIn(forbidden, json.dumps(row))
         self.assertFalse(any(key in row for key in ('text', 'message', 'stack', 'apiKey', 'build', 'job', 'control', 'engine')))
+        response = self.post(dict(events=[dict(event='page.reading', highlightParagraphs=7, highlightRanges=84,
+            gapMs=15000, text=forbidden)]))
+        self.assertEqual(response.status_code, 200)
+        row = json.loads(self.diagnostics.path.read_text().splitlines()[-1])
+        self.assertEqual(row['highlightParagraphs'], 7)
+        self.assertNotIn(forbidden, json.dumps(row))
         with tempfile.TemporaryDirectory(prefix='kandu-diagnostics-') as directory:
             log = Diagnostics(directory, max_bytes=100, backups=2)
             for n in range(20):

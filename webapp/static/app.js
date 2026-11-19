@@ -43,6 +43,7 @@ const readerDiagnostics=(()=>{
         standalone:matchMedia('(display-mode:standalone)').matches||navigator.standalone===true,
         dialogOpen:!!sheet?.open,dialogModal:!!sheet?.matches(':modal'),waitPresent:!!wait,waitHidden:!!wait?.hidden,
         highlightRanges:window.CSS?.highlights?.get('kandu-vocabulary')?.size||0,
+        highlightParagraphs:state.reader?.vocabHighlightWindow?state.reader.vocabHighlightWindow.end-state.reader.vocabHighlightWindow.start:0,
         modalHighlightsSuspended:!!state.reader?.highlightsSuspended,
         width:innerWidth,height:innerHeight,visualHeight:Math.round(window.visualViewport?.height||innerHeight),scrollY:Math.round(scrollY),...extra});
       queue=queue.slice(-72);
@@ -63,8 +64,11 @@ const readerDiagnostics=(()=>{
     const target=e.target.closest?.('.sheet-wait-close,.sheet-wait-footer button,#sheet-close,#sheet-background');
     if(target)event(name,{control:target.matches('.sheet-wait-close')?'wait-close':target.matches('.sheet-wait-footer button')?'wait-view':target.id==='sheet-close'?'sheet-close':'sheet-background'});
   },{capture:true,passive:true});
+  let lastReadingSample=0;
   setInterval(()=>{const now=performance.now(),gapMs=Math.round(now-lastBeat);lastBeat=now;
-    if(active&&state.sheetWait)event('wait.heartbeat',{gapMs});},15000);
+    if(active&&state.sheetWait)event('wait.heartbeat',{gapMs});
+    if(state.reader?.ready&&!document.hidden&&now-lastReadingSample>=30000){lastReadingSample=now;event('page.reading',{gapMs});}
+  },15000);
   return {event,error,start(){
     const context=active={trace:readingId().slice(0,12),phase:'start',started:performance.now(),polls:0};event('analysis.start');
     return {step(phase,extra={}){context.phase=phase;Object.assign(context,extra);event('analysis.'+phase,extra,context);},
@@ -318,7 +322,7 @@ function restoreReaderHighlights() {
   reader.highlightRestoreFrame=requestAnimationFrame(()=>{
     reader.highlightRestoreFrame=null;
     if(state.reader!==reader||reader.highlightsSuspended||$('#sheet').open)return;
-    if(reader.vocabHighlightsDirty)updateVocabHighlights(reader);
+    if(reader.vocabHighlightsDirty||!sameVocabHighlightWindow(reader,vocabHighlightWindow(reader)))updateVocabHighlights(reader);
     else if(reader.vocabHighlightEnabled&&reader.suspendedVocabHighlight)
       window.CSS?.highlights?.set('kandu-vocabulary',reader.suspendedVocabHighlight);
     reader.suspendedVocabHighlight=null;
@@ -1200,12 +1204,37 @@ function indexVocabHover(reader) {
   }
 }
 function supportsVocabHighlights() { return Boolean(window.CSS?.highlights&&typeof Highlight==='function'); }
-function updateVocabHighlights(reader) {
+function vocabHighlightWindow(reader) {
+  const nodes=reader.paragraphNodes,count=nodes.length;
+  // Keep short articles unchanged. Long transcripts must not register thousands
+  // of offscreen Ranges: iOS can lose prose tiles even without an open modal.
+  if(count<=32)return {start:0,end:count};
+  const height=window.visualViewport?.height||innerHeight,top=window.visualViewport?.offsetTop||0;
+  const lower=top-height*1.5,upper=top+height*2.5;
+  const firstAfter=(edge,coordinate)=>{
+    let low=0,high=count;
+    while(low<high){const middle=(low+high)>>>1;
+      if(nodes[middle].getBoundingClientRect()[edge]<coordinate)low=middle+1;else high=middle;}
+    return low;
+  };
+  return {start:firstAfter('bottom',lower),end:firstAfter('top',upper)};
+}
+function sameVocabHighlightWindow(reader,bounds) {
+  const previous=reader.vocabHighlightWindow;
+  return previous&&previous.start===bounds.start&&previous.end===bounds.end;
+}
+function refreshVocabHighlightWindow(reader) {
+  if(!reader.hoverWords||!reader.vocabHighlightEnabled||!supportsVocabHighlights())return;
+  const bounds=vocabHighlightWindow(reader);
+  if(!sameVocabHighlightWindow(reader,bounds))updateVocabHighlights(reader,bounds);
+}
+function updateVocabHighlights(reader,bounds=vocabHighlightWindow(reader)) {
   if(!supportsVocabHighlights())return;
   if(reader.highlightsSuspended){reader.vocabHighlightsDirty=true;CSS.highlights.delete('kandu-vocabulary');return;}
   reader.suspendedVocabHighlight=null;reader.vocabHighlightsDirty=false;
+  reader.vocabHighlightWindow=bounds;
   const highlight=new Highlight();
-  if(reader.vocabHighlightEnabled)for(let paragraph=0;paragraph<reader.paragraphNodes.length;paragraph++) {
+  if(reader.vocabHighlightEnabled)for(let paragraph=bounds.start;paragraph<bounds.end;paragraph++) {
     const p=$('p',reader.paragraphNodes[paragraph]),spans=[];
     // Merge repeated phrase spans so the spaces in "paper over" share one tint.
     const matches=(reader.hoverWords?.get(paragraph)||[]).filter(t=>t.entry)
@@ -1482,7 +1511,7 @@ async function readerPage(bookId,index,token,startParagraph=null) {
   installVocabHover(reader,article);
   installTouchReading(reader,body,pointToggle);
   document.addEventListener('selectionchange',reader.selectionHandler=()=>{if(state.reader===reader)selectionBar(reader);});
-  window.addEventListener('resize',reader.selectionResize=()=>positionSelectionBar(reader));
+  window.addEventListener('resize',reader.selectionResize=()=>{positionSelectionBar(reader);refreshVocabHighlightWindow(reader);});
   window.visualViewport?.addEventListener('resize',reader.selectionResize);
   window.visualViewport?.addEventListener('scroll',reader.selectionResize);
   find.oninput=()=>findArticle(reader,find.value);
@@ -1494,11 +1523,12 @@ async function readerPage(bookId,index,token,startParagraph=null) {
     if(explicitPosition)node.classList.add('source-target');
   }
   reader.ready=true;
+  readerDiagnostics.event('page.reading');
   startReadingClock(reader,explicitPosition||data.history&&!data.history.atStart?currentPosition(reader):{paragraphIndex:0,paragraphOffset:0});
   updateReaderProgress(reader);
   readerScroll=()=>{
     if(state.reader!==reader)return;
-    if(!progressFrame)progressFrame=requestAnimationFrame(()=>{progressFrame=null;updateReaderProgress(reader);positionSelectionBar(reader);});
+    if(!progressFrame)progressFrame=requestAnimationFrame(()=>{progressFrame=null;updateReaderProgress(reader);positionSelectionBar(reader);refreshVocabHighlightWindow(reader);});
     if(reader.restoringProgress)return;
     progressStatus(reader,'阅读中');clearTimeout(progressTimer);progressTimer=setTimeout(()=>saveProgress(),850);
   };
@@ -1508,7 +1538,7 @@ async function readerPage(bookId,index,token,startParagraph=null) {
   refreshRemoteProgress(reader);
   await loadVocab(reader);
 }
-function resizeReader(reader,delta){reader.hoverHide?.();reader.fontSize=Math.max(16,Math.min(30,reader.fontSize+delta));$('#reader-body').style.setProperty('--reading-size',reader.fontSize+'px');localStorage.setItem('kandu-font',reader.fontSize);updateReaderProgress(reader);}
+function resizeReader(reader,delta){reader.hoverHide?.();reader.fontSize=Math.max(16,Math.min(30,reader.fontSize+delta));$('#reader-body').style.setProperty('--reading-size',reader.fontSize+'px');localStorage.setItem('kandu-font',reader.fontSize);updateReaderProgress(reader);refreshVocabHighlightWindow(reader);}
 function findArticle(reader,query) {
   reader.hoverHide?.();
   clearReaderSelection(reader);

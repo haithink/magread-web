@@ -154,7 +154,7 @@ def main():
             for width in [1440, 390]:
                 for record in wordbook.list_words():
                     wordbook.delete(record['word'])
-                context = browser.new_context(viewport=dict(width=width, height=900))
+                context = browser.new_context(viewport=dict(width=width, height=900), service_workers='block')
                 page = context.new_page(); page.on('pageerror', lambda error:errors.append(str(error)))
                 page.on('request', lambda request: requests.append((request.method, request.url)))
                 page.goto(f'http://127.0.0.1:{server.server_port}/#/read/sample/0')

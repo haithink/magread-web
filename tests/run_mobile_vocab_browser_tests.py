@@ -49,7 +49,7 @@ def main():
                 for record in wordbook.list_words():
                     wordbook.delete(record['word'])
                 context=browser.new_context(viewport=dict(width=width,height=height),device_scale_factor=3,
-                                            is_mobile=True,has_touch=True)
+                                            is_mobile=True,has_touch=True,service_workers='block')
                 page=context.new_page();page.on('pageerror',lambda e:errors.append(str(e)))
                 for endpoint in ['analyze','lookup','lookup-context','generate-vocab']:
                     page.route('**/'+endpoint,lambda route:route.fulfill(status=503,json=dict(error='Unexpected model request in passive tap test')))
