@@ -360,6 +360,7 @@ $('#logout').onclick = action(async () => {
 });
 
 function showLogin() {
+  state.pwaCleanup?.();state.pwaCleanup=null;
   state.cacheIdentity=(state.cacheIdentity||0)+1;
   state.route++;
   state.reader?.hoverCleanup?.();
@@ -1715,8 +1716,9 @@ async function settingsPage(token) {
   const level=el('select',{},...Object.entries({cet4:'四级 CET-4',cet6:'六级 CET-6',toefl:'TOEFL',gre:'GRE'}).map(([k,v])=>el('option',{value:k},v)));level.value=data.vocabLevel;
   level.onchange=action(async()=>{await api('/preferences',{method:'POST',data:{vocabLevel:level.value}});toast('词汇水平已保存');});
   const modelPanels=el('div',{class:'settings-grid config-panels'});
+  const installation=window.KanduPWA?.panel();state.pwaCleanup=()=>installation?.cleanup();
   view.replaceChildren(heading('MAKE IT YOURS','阅读设置','模型配置由独立密码保护，各设备共用阅读偏好'),
-    el('section',{class:'panel'},el('h2',{},'阅读偏好'),el('label',{},'默认已掌握的词汇',level)),modelPanels,readingCachePanel(),syncSettingsPanel(sync));
+    el('section',{class:'panel'},el('h2',{},'阅读偏好'),el('label',{},'默认已掌握的词汇',level)),installation,modelPanels,readingCachePanel(),syncSettingsPanel(sync));
   if(!access.unlocked){
     const password=el('input',{type:'password',required:true,maxlength:200,autocomplete:'current-password','aria-label':'模型配置独立密码'});
     const error=el('p',{class:'error',role:'alert',hidden:true});
@@ -1881,6 +1883,7 @@ function editModel(initial) {
 }
 
 async function route({refresh=false}={}) {
+  state.pwaCleanup?.();state.pwaCleanup=null;
   clearTimeout(toastTimer);$('#toast').hidden=true;
   view.querySelectorAll('img').forEach(img=>img.coverObserver?.disconnect());
   state.reader?.touchCleanup?.();
@@ -1917,4 +1920,27 @@ window.addEventListener('pagehide',()=>{readingClockTick();flushReadingClock(sta
 document.addEventListener('visibilitychange',()=>{readingClockTick();if(document.hidden){flushReadingClock(state.reader,true);saveProgress(true);}else{if(state.reader?.clock)state.reader.clock.lastInteraction=performance.now();refreshRemoteProgress();}});
 window.addEventListener('focus',()=>refreshRemoteProgress());
 window.addEventListener('pageshow',()=>refreshRemoteProgress());
-(async()=>{try{const session=await api('/session');if(session.authenticated){state.csrf=session.csrf;await initReadingStorage(session);await route();}else{ReadingSync.reset();await ReadingCache.init('');await ReadingCache.clear();showLogin();}}catch(error){view.replaceChildren(empty('连接服务器失败',error.message));}})();
+async function preparePwaReload(){
+  if(state.activeJobs.size)throw new Error('有 AI 或导入任务正在运行，请等结果保存后再更新。');
+  readingClockTick();saveProgress(true);
+  try{await flushReadingClock();await ReadingSync.drain();}
+  catch{throw new Error('阅读记录尚未同步，请联网同步完成后再更新。');}
+  if(ReadingSync.pending())throw new Error('阅读记录尚未同步，请联网同步完成后再更新。');
+}
+let startupPending=false,startupFailed=false;
+async function startApplication(){
+  if(startupPending)return;
+  startupPending=true;
+  try{
+    const session=await api('/session');startupFailed=false;
+    if(session.authenticated){state.csrf=session.csrf;await initReadingStorage(session);await route();}
+    else{ReadingSync.reset();await ReadingCache.init('');await ReadingCache.clear();showLogin();}
+  }catch(error){
+    startupFailed=true;
+    view.replaceChildren(empty(navigator.onLine===false?'当前离线':'暂时无法连接书库',
+      '请联网确认登录后继续阅读。已保存的阅读缓存和待同步记录仍保留在本机。'),
+      button('重试连接',()=>startApplication(),'primary'));
+  }finally{startupPending=false;}
+}
+window.addEventListener('online',()=>{if(startupFailed)startApplication();});
+startApplication();

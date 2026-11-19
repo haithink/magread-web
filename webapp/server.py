@@ -24,6 +24,7 @@ from kandu import core_llm as llm, core_wordbook as wordbook, core_dict, core_di
 from webapp import __version__
 from webapp import reading_stats
 from webapp import reading_activity
+from webapp import pwa
 from webapp import word_meaning
 from webapp import article_duplicates
 from webapp import article_tags
@@ -300,10 +301,11 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare
         response.headers.update({'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'same-origin',
             'X-Frame-Options': 'SAMEORIGIN', 'Cache-Control': 'no-store',
             'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
-                "connect-src 'self'; frame-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; form-action 'self'"})
+                "connect-src 'self'; worker-src 'self'; manifest-src 'self'; frame-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'self'; form-action 'self'"})
         if request.method in ('GET', 'HEAD') and response.status_code in (200, 304):
             if request.endpoint == 'static':
                 version = hashlib.sha256((STATIC / request.view_args['name']).read_bytes()).hexdigest()[:16]
+                response.headers['X-Kandu-Asset-Version'] = version
                 response.headers['Cache-Control'] = 'public, max-age=31536000, immutable' if request.args.get('v') == version else 'no-cache'
             elif request.endpoint == 'cover':
                 response.headers['Cache-Control'] = 'private, max-age=3600'
@@ -324,15 +326,25 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare
 
     @app.get('/')
     def index():
-        html = (STATIC / 'index.html').read_text(encoding='utf-8')
-        for name in ('app.js', 'app.css', 'icon.svg', 'reading-charts.js', 'reading-cache.js'):
-            version = hashlib.sha256((STATIC / name).read_bytes()).hexdigest()[:16]
-            html = html.replace('/static/' + name, '/static/' + name + '?v=' + version)
-        return app.response_class(html, mimetype='text/html')
+        response = app.response_class(pwa.index(STATIC), mimetype='text/html')
+        response.headers['X-Kandu-Shell-Version'] = pwa.bundle(STATIC)[0]
+        return response
+
+    @app.get('/manifest.webmanifest')
+    def manifest():
+        response = send_file(STATIC / 'manifest.webmanifest', mimetype='application/manifest+json')
+        response.headers['X-Kandu-Asset-Version'] = pwa.asset_version(STATIC, 'manifest.webmanifest')
+        return response
+
+    @app.get('/sw.js')
+    def service_worker():
+        response = app.response_class(pwa.worker(STATIC), mimetype='application/javascript')
+        response.headers['Service-Worker-Allowed'] = '/'
+        return response
 
     @app.get('/static/<name>')
     def static(name):
-        if name not in ('app.js', 'app.css', 'icon.svg', 'reading-charts.js', 'reading-cache.js'):
+        if name not in pwa.ASSETS:
             abort(404)
         return send_file(STATIC / name)
 
