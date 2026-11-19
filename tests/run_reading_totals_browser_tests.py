@@ -80,14 +80,17 @@ def main():
                     expect(page.get_by_role('combobox',name='图表日期范围')).to_have_value('7')
                     expect(page.locator('#reading-cache-notice')).to_have_count(0)
                     assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
-                    # An early completion changes only the completed-article metric.
+                    # Completion replaces partial credit with the full article;
+                    # the original measured-word and speed ledger stays intact.
+                    measured_before=activity.report([])['totals']
                     page.evaluate('''async () => {
                         await api('/books/sample/state',{method:'POST',data:{articleIndex:0,state:'read'}});
                     }''')
                     page.reload()
                     expect(page.locator('[data-stat="words"]')).to_have_text('2,000')
-                    expect(measured).to_have_text(f'{before+100:,}')
+                    expect(measured).to_have_text('2,000')
                     expect(page.locator('[data-stat="articles"]')).to_have_text('1')
+                    assert activity.report([])['totals']==measured_before
                     if folder:=os.environ.get('KANDU_TEST_ARTIFACTS'):
                         target=Path(folder);target.mkdir(parents=True,exist_ok=True)
                         page.screenshot(path=str(target/('reading-totals-phone.png' if mobile else 'reading-totals-desktop.png')),full_page=True)
@@ -95,7 +98,7 @@ def main():
                     delayed=[]
                     page.route('**/api/reading-stats?*',lambda route:delayed.append(route))
                     page.reload()
-                    expect(measured).to_have_text(f'{before+100:,}')
+                    expect(measured).to_have_text('2,000')
                     page.evaluate("location.hash='#/read/sample/0'")
                     expect(page.locator('#reader-reading-time')).to_be_visible()
                     for route in delayed:route.continue_()

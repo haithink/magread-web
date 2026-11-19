@@ -1817,7 +1817,7 @@ async function readingStatsPage(token) {
     if(!value||token!==state.route||controller.signal.aborted)return;
     data=value;
     const analytics=data.analytics,total=analytics.totals;
-    const values={'measured-words':total.measuredWords.toLocaleString(),words:data.totalWords.toLocaleString(),
+    const values={'measured-words':(analytics.readingVolume?.totalWords??total.measuredWords).toLocaleString(),words:data.totalWords.toLocaleString(),
       articles:data.articleCount.toLocaleString(),'active-time':readingDuration(total.activeMs),
       speed:total.wordsPerMinute===null?'—':`${total.wordsPerMinute} 词/分`,
       'active-days':`${analytics.activeDays} 天`,streak:`${analytics.currentStreak} 天`};
@@ -1849,7 +1849,7 @@ async function readingStatsPage(token) {
   const initial=await api(path,{onUpdate:applyData});if(token!==state.route)return;
   view.replaceChildren(heading('YOUR READING JOURNEY','已读统计','看见每天的积累，也看见阅读节奏的变化。'),
     totals,
-    el('p',{class:'count'},'实际阅读词数按计时期间正文位置前进估算，包含未读完的文章；阅读记录同步后自动更新。已完成文章总词数按全文计入，同标题去重后取最大值。'),
+    el('p',{class:'count'},'累计实际阅读词数＝已完成文章全文词数＋未读完文章的计时阅读估算。完成后用全文替换部分阅读量，同标题去重；提前标记已读也按全文计算。阅读记录同步后自动更新。'),
     charts,el('div',{class:'filters'},search,count),list);
   applyData(initial);ReadingSync.drain().catch(()=>{});
 }

@@ -169,12 +169,19 @@ def report(articles, days=365, timezone_offset=0, publications=None):
     first_ms = int(datetime.combine(start, datetime.min.time(), tz).timestamp()*1000)
     daily = { (start+timedelta(days=i)).isoformat():dict(date=(start+timedelta(days=i)).isoformat(),
         activeMs=0, measuredWords=0, completedWords=0, completedArticles=0) for i in range(days)}
-    by_title, active_dates = {}, set()
+    by_title, partial_by_title, active_dates = {}, {}, set()
     total_words = total_ms = 0
     if database().is_file():
         with connection() as db:
-            for row in db.execute('SELECT title_key,SUM(words) words,SUM(active_ms) active_ms FROM intervals GROUP BY title_key'):
-                by_title[row['title_key']] = timing(row['words'], row['active_ms'])
+            for row in db.execute('SELECT title_key,source_id,SUM(words) words,SUM(active_ms) active_ms '
+                                  'FROM intervals GROUP BY title_key,source_id'):
+                key = row['title_key']
+                previous = by_title.get(key, timing())
+                by_title[key] = timing(previous['measuredWords'] + row['words'], previous['activeMs'] + row['active_ms'])
+                # Duplicate publications may contain the same prose. Their
+                # partial samples need not cover different words; take the
+                # largest source estimate instead of adding the copies.
+                partial_by_title[key] = max(partial_by_title.get(key, 0), row['words'])
                 total_words += row['words']
                 total_ms += row['active_ms']
             modifier = f'{-timezone_offset:+d} minutes'
@@ -215,7 +222,13 @@ def report(articles, days=365, timezone_offset=0, publications=None):
     for value in daily.values():
         value['wordsPerMinute'] = speed(value['measuredWords'], value['activeMs'])
     current, longest = _streak(active_dates, today)
+    completed = {reading_stats.title_key(article['title']): article['wordCount'] for article in articles}
+    completed_words = sum(completed.values())
+    unfinished = {key: words for key, words in partial_by_title.items() if key not in completed and words > 0}
+    unfinished_words = sum(unfinished.values())
     return dict(daily=list(daily.values()), totals=timing(total_words,total_ms),
+        readingVolume=dict(totalWords=completed_words + unfinished_words, completedWords=completed_words,
+            unfinishedWords=unfinished_words, unfinishedArticleCount=len(unfinished)),
         activeDays=len(active_dates), currentStreak=current, longestStreak=longest,
         sources=sorted((dict(name=k,**v) for k,v in distribution.items()),key=lambda v:v['words'],reverse=True),
         timezoneOffset=timezone_offset, minSpeedMs=MIN_SPEED_MS, minSpeedWords=MIN_SPEED_WORDS)

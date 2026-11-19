@@ -99,20 +99,56 @@ class ActivityTests(unittest.TestCase):
             self.pulse(sequence,sequence*30_000,words)
             stats=self.report(days=7).json
             self.assertEqual(stats['analytics']['totals']['measuredWords'],words)
+            self.assertEqual(stats['analytics']['readingVolume'],dict(totalWords=words,completedWords=0,
+                unfinishedWords=words,unfinishedArticleCount=1))
             self.assertEqual(sum(day['measuredWords'] for day in stats['analytics']['daily']),words)
             self.assertEqual(stats['articleCount'],0)
             self.assertEqual(stats['totalWords'],0)
-        # Completing early credits the full article only to the completion metric.
+        # Completing early replaces partial credit with full volume, without
+        # changing measured words, speed or the original timing ledger.
         self.post('/books/sample/state',dict(articleIndex=0,state='read'))
         stats=self.report().json
         self.assertEqual(stats['articleCount'],1)
         self.assertEqual(stats['totalWords'],2000)
         self.assertEqual(stats['analytics']['totals']['measuredWords'],200)
+        self.assertEqual(stats['analytics']['readingVolume'],dict(totalWords=2000,completedWords=2000,
+            unfinishedWords=0,unfinishedArticleCount=0))
+        self.assertEqual(stats['analytics']['totals']['wordsPerMinute'],200)
+        self.assertEqual(self.report(days=7).json['analytics']['readingVolume'],stats['analytics']['readingVolume'])
         # Removing a completion does not remove the reading already measured.
         self.post('/books/sample/state',dict(articleIndex=0,state='unread'))
         stats=self.report().json
         self.assertEqual(stats['totalWords'],0)
         self.assertEqual(stats['analytics']['totals']['measuredWords'],200)
+        self.assertEqual(stats['analytics']['readingVolume']['totalWords'],200)
+
+    def test_reading_volume_deduplicates_partial_sources_and_replaces_them_on_completion(self):
+        duplicate=dict(self.other,title='A CANDID VIEW!')
+        third=dict(self.art,index=2,title='A separate unfinished article')
+        store._atomic_json_write(store._cache_dir('sample')/'content.json',dict(
+            bookSize=WebTests.meta['size'],format='epub',articles=[self.art,duplicate,third]))
+        for session,index,words in [('clock-duplicate-0001',0,100),('clock-duplicate-0002',1,60),
+                                    ('clock-duplicate-0003',2,50)]:
+            self.pulse(session=session,index=index)
+            self.now+=30_000
+            self.pulse(1,30_000,words,session=session,index=index)
+        stats=self.report().json
+        self.assertEqual(stats['analytics']['totals']['measuredWords'],210)
+        self.assertEqual(stats['analytics']['readingVolume'],dict(totalWords=150,completedWords=0,
+            unfinishedWords=150,unfinishedArticleCount=2))
+        self.post('/books/sample/state',dict(articleIndex=0,state='read'))
+        self.post('/books/sample/state',dict(articleIndex=1,state='read'))
+        stats=self.report().json
+        self.assertEqual(stats['articleCount'],1)
+        self.assertEqual(stats['analytics']['readingVolume'],dict(totalWords=2050,completedWords=2000,
+            unfinishedWords=50,unfinishedArticleCount=1))
+        chrome=dict(title='A candid view',wordCount=2100,readAt=int(datetime.now(timezone.utc).timestamp()*1000),
+            url='https://example.invalid/duplicate')
+        reading_stats.import_records([chrome,chrome])
+        stats=self.report().json
+        self.assertEqual(stats['analytics']['readingVolume']['totalWords'],2150)
+        self.assertEqual(stats['analytics']['totals']['measuredWords'],210)
+        self.assertEqual(sum(d['measuredWords'] for d in stats['analytics']['daily']),210)
 
     def test_returning_to_previous_paragraph_does_not_count_same_words_again(self):
         self.pulse()
@@ -172,6 +208,9 @@ class ActivityTests(unittest.TestCase):
         report=self.report().json
         self.assertEqual(report['totalWords'],2100)
         self.assertEqual(report['articleCount'],1)
+        self.assertEqual(report['analytics']['readingVolume'],dict(totalWords=2100,completedWords=2100,
+            unfinishedWords=0,unfinishedArticleCount=0))
+        self.assertEqual(report['analytics']['totals'],activity.timing())
         self.assertEqual(report['articles'][0]['timing'],activity.timing())
         self.assertFalse(activity.database().exists())
         first=datetime.fromtimestamp(old['firstReadAt']/1000,timezone.utc).date().isoformat()
