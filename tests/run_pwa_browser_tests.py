@@ -23,9 +23,11 @@ def main():
     store._atomic_json_write(store._cache_dir('sample')/'content.json',dict(
         bookSize=WebTests.meta['size'],format='epub',articles=[article]))
     failed_asset=[False]
+    worker_requests=[]
 
     @WebTests.app.before_request
     def fail_shell_install():
+        if request.path=='/sw.js':worker_requests.append(request.path)
         if failed_asset[0] and request.path=='/static/pwa.js':
             return 'Simulated incomplete shell',503
 
@@ -49,6 +51,33 @@ def main():
                     expect(page.locator('#reader-reading-time')).to_be_visible()
                     page.wait_for_function('() => !!navigator.serviceWorker.controller',timeout=60_000)
                     page.wait_for_function('() => state.reader?.vocab && ReadingSync.pending()===0')
+                    # Home offers an explicit check in both browser and installed
+                    # windows. Consecutive clicks bypass the background throttle.
+                    page.evaluate("location.hash='#/library'")
+                    control=page.locator('.pwa-check')
+                    expect(control.get_by_role('button',name='检查更新',exact=True)).to_be_visible()
+                    previous_checks=len(worker_requests)
+                    for _ in range(2):
+                        control.get_by_role('button',name='检查更新',exact=True).click()
+                        expect(control).to_contain_text('已是最新版本')
+                        expect(control.get_by_role('button')).to_be_enabled()
+                    assert len(worker_requests)>=previous_checks+2,worker_requests
+                    page.evaluate('''() => {
+                        window.originalWorkerUpdate=ServiceWorkerRegistration.prototype.update;
+                        ServiceWorkerRegistration.prototype.update=()=>Promise.reject(new TypeError('simulated failure'));
+                    }''')
+                    control.get_by_role('button',name='检查更新',exact=True).click()
+                    expect(control).to_contain_text('检查失败，请确认网络连接后重试')
+                    expect(control.get_by_role('button')).to_be_enabled()
+                    page.evaluate('() => {ServiceWorkerRegistration.prototype.update=originalWorkerUpdate;}')
+                    context.set_offline(True)
+                    control.get_by_role('button',name='检查更新',exact=True).click()
+                    expect(control).to_contain_text('当前离线')
+                    expect(control.get_by_role('button')).to_be_enabled()
+                    context.set_offline(False)
+                    page.evaluate("location.hash='#/read/sample/0'")
+                    expect(control).to_have_count(0)
+                    expect(page.locator('#reader-reading-time')).to_be_visible()
                     if engine=='chromium':
                         manifest=context.new_cdp_session(page).send('Page.getAppManifest')
                         assert not manifest['errors'],manifest['errors']
@@ -103,10 +132,25 @@ def main():
                     }''')
                     expect(page.locator('.pwa-update')).to_have_count(0)
                     assert page.evaluate('scrollY')==y
+                    page.evaluate("location.hash='#/library'")
+                    control.get_by_role('button',name='检查更新',exact=True).click()
+                    expect(control).to_contain_text('新版下载失败')
+                    expect(control.get_by_role('button')).to_be_enabled()
                     failed_asset[0]=False
                     await_version=pwa.bundle(assets)[0]
-                    page.evaluate('async () => (await navigator.serviceWorker.getRegistration()).update()')
+                    control.get_by_role('button',name='检查更新',exact=True).click()
                     expect(page.locator('.pwa-update')).to_be_visible()
+                    expect(control.get_by_role('button',name='更新刊读',exact=True)).to_be_enabled()
+                    page.evaluate("state.activeJobs.set('home-update-job',{})")
+                    control.get_by_role('button',name='更新刊读',exact=True).click()
+                    expect(control).to_contain_text('任务正在运行')
+                    page.evaluate("state.activeJobs.delete('home-update-job')")
+                    page.evaluate("location.hash='#/read/sample/0'")
+                    expect(page.locator('#reader-reading-time')).to_be_visible()
+                    if page.locator('#reader-remote-progress').is_visible():
+                        page.get_by_role('button',name='保持当前位置',exact=True).click()
+                    page.evaluate("document.querySelector('#reading-cache-notice')?.remove()")
+                    page.evaluate('(y)=>scrollTo(0,y)',y)
                     assert page.evaluate('scrollY')==y
                     if artifacts:=os.environ.get('KANDU_TEST_ARTIFACTS'):
                         page.screenshot(path=str(Path(artifacts)/f'pwa-update-{engine}.png'))
@@ -120,11 +164,30 @@ def main():
                     expect(page.locator('.pwa-update')).to_contain_text('阅读记录尚未同步')
                     assert page.evaluate('scrollY')==y
                     context.set_offline(False)
-                    page.locator('.pwa-update').get_by_role('button',name='更新',exact=True).click()
+                    with page.expect_navigation(wait_until='domcontentloaded'):
+                        page.locator('.pwa-update').get_by_role('button',name='更新',exact=True).click()
                     page.wait_for_function('(version) => navigator.serviceWorker.controller && caches.keys().then(keys=>keys.includes("kandu-public-shell-"+version)&&keys.filter(key=>key.startsWith("kandu-public-shell-")).length===1)',arg=await_version,timeout=60_000)
                     expect(page.locator('#reader-reading-time')).to_be_visible()
                     assert page.url.endswith('#/read/sample/0')
                     expect(page.locator('.pwa-update')).to_have_count(0)
+                    # A subsequent update can be completed entirely from Home.
+                    css.write_text(css.read_text(encoding='utf-8')+'\n/* Home update test */\n',encoding='utf-8')
+                    home_version=pwa.bundle(assets)[0]
+                    page.evaluate("location.hash='#/library'")
+                    control.get_by_role('button',name='检查更新',exact=True).click()
+                    expect(control.get_by_role('button',name='更新刊读',exact=True)).to_be_enabled()
+                    expect(page.locator('.pwa-update')).to_be_visible()
+                    page.evaluate("document.querySelector('#reading-cache-notice')?.remove()")
+                    page.locator('.pwa-update').get_by_role('button',name='稍后',exact=True).click()
+                    expect(page.locator('.pwa-update')).to_have_count(0)
+                    with page.expect_navigation(wait_until='domcontentloaded'):
+                        control.get_by_role('button',name='更新刊读',exact=True).click()
+                    page.wait_for_function('(version) => caches.keys().then(keys=>keys.includes("kandu-public-shell-"+version)&&keys.filter(key=>key.startsWith("kandu-public-shell-")).length===1)',arg=home_version,timeout=60_000)
+                    expect(page.get_by_role('heading',name='我的阅读室',exact=True)).to_be_visible()
+                    expect(control.get_by_role('button',name='检查更新',exact=True)).to_be_visible()
+                    assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
+                    if artifacts:=os.environ.get('KANDU_TEST_ARTIFACTS'):
+                        page.screenshot(path=str(Path(artifacts)/f'pwa-home-{engine}.png'))
                     # Logout clears reading data but retains a public launch shell.
                     page.locator('#logout').click()
                     expect(page.locator('#login-form')).to_be_visible()

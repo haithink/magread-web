@@ -528,7 +528,10 @@ async function library(token) {
   }
   data.recent.sort((a,b)=>b.lastReadAt-a.lastReadAt);data.recent=data.recent.slice(0,80);
   const content=el('div');
+  state.pwaCleanup?.();
+  const updateControl=window.KanduPWA?.updateControl();state.pwaCleanup=()=>updateControl?.cleanup();
   content.append(heading('A WINDOW TO THE WORLD','我的阅读室',`${data.books.length} 本刊物 · 阅读结果集中保存，各设备接续阅读`,[
+    updateControl,
     button('刊物来源',action(podcastSheet)),
     button('＋ 添加刊物',uploadSheet,'primary')
   ]));

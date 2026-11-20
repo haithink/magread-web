@@ -1,6 +1,7 @@
 'use strict';
 window.KanduPWA=(()=>{
   let registration=null,installPrompt=null,updating=false,reloadRequested=false,lastCheck=0,banner=null,dismissedWorker=null;
+  let registrationTask=null,checking=false,checkMessage='';
   const listeners=new Set();
   const standalone=()=>matchMedia('(display-mode:standalone)').matches||navigator.standalone===true;
   const node=(tag,attrs={},...children)=>{
@@ -35,9 +36,70 @@ window.KanduPWA=(()=>{
     }catch(error){status.textContent=error.message||'暂时无法更新，请稍后重试。';}
     finally{updating=false;control.disabled=false;}
   }
-  async function check(){
-    if(!registration||document.hidden||navigator.onLine===false||Date.now()-lastCheck<60_000)return;
-    lastCheck=Date.now();try{await registration.update();}catch{}
+  function initialize(){
+    if(registrationTask)return registrationTask;
+    registrationTask=(async()=>{
+      registration=await navigator.serviceWorker.register('/sw.js',{scope:'/',updateViaCache:'none'});
+      const watch=()=>{
+        const worker=registration.installing;
+        worker?.addEventListener('statechange',()=>{
+          if(worker.state==='installed'&&navigator.serviceWorker.controller){
+            checkMessage='新版已准备好，可以更新。';showUpdate();notify();
+          }
+        });
+      };
+      registration.addEventListener('updatefound',watch);watch();showUpdate();notify();
+      return registration;
+    })().catch(error=>{registrationTask=null;throw error;});
+    return registrationTask;
+  }
+  function installed(worker){
+    return new Promise((resolve,reject)=>{
+      const finish=()=>{
+        if(!['installed','activated','redundant'].includes(worker.state))return;
+        worker.removeEventListener('statechange',finish);clearTimeout(timer);
+        if(worker.state==='redundant')reject(new Error('新版下载失败，请稍后重试；当前版本可继续使用。'));
+        else resolve();
+      };
+      const timer=setTimeout(()=>{
+        worker.removeEventListener('statechange',finish);
+        reject(new Error('新版仍在下载，请稍后再检查。'));
+      },45_000);
+      worker.addEventListener('statechange',finish);finish();
+    });
+  }
+  async function check(manual=false){
+    if(checking)return;
+    if(!manual&&(!registration||document.hidden||navigator.onLine===false||Date.now()-lastCheck<60_000))return;
+    checking=true;checkMessage='正在检查更新…';notify();
+    try{
+      if(navigator.onLine===false)throw new Error('当前离线，请联网后检查更新。');
+      if(!window.isSecureContext)throw new Error('请使用 HTTPS 域名访问后检查应用更新。');
+      if(!('serviceWorker' in navigator))throw new Error('当前浏览器不支持应用更新，请重新打开网页。');
+      lastCheck=Date.now();
+      try{await initialize();await registration.update();}
+      catch{throw new Error('检查失败，请确认网络连接后重试。');}
+      if(registration.installing){checkMessage='发现新版，正在下载…';notify();await installed(registration.installing);}
+      checkMessage=registration.waiting?'新版已准备好，可以更新。':'已是最新版本。';
+      if(manual)dismissedWorker=null;
+      showUpdate();
+    }catch(error){checkMessage=error.message||'检查失败，请确认网络连接后重试。';}
+    finally{checking=false;notify();}
+  }
+  function updateControl(){
+    const status=node('span',{class:'pwa-check-status',role:'status','aria-live':'polite'});
+    const control=button('检查更新',()=>{
+      if(registration?.waiting)activate(status,control);
+      else check(true);
+    });
+    const root=node('div',{class:'pwa-check'},control,status);
+    const render=()=>{
+      control.textContent=checking?'正在检查…':registration?.waiting?'更新刊读':'检查更新';
+      control.disabled=checking||updating;
+      status.textContent=checkMessage||(registration?.waiting?'新版已准备好，可以更新。':'');
+    };
+    render();listeners.add(render);root.cleanup=()=>listeners.delete(render);
+    return root;
   }
   async function install(status){
     if(!installPrompt){status.textContent='iPhone：点击浏览器的分享按钮 → 添加到主屏幕 → 添加；如有「作为 Web App 打开」，请开启。Chrome 中未找到入口时，可用 Safari 打开相同地址添加。';return;}
@@ -62,7 +124,7 @@ window.KanduPWA=(()=>{
   }
   window.addEventListener('beforeinstallprompt',event=>{event.preventDefault();installPrompt=event;notify();});
   window.addEventListener('appinstalled',()=>{installPrompt=null;notify();});
-  window.addEventListener('online',check);
+  window.addEventListener('online',()=>check());
   document.addEventListener('visibilitychange',()=>{if(!document.hidden)check();});
   if('serviceWorker' in navigator&&window.isSecureContext){
     navigator.serviceWorker.addEventListener('controllerchange',()=>{
@@ -70,18 +132,9 @@ window.KanduPWA=(()=>{
       notify();
     });
     window.addEventListener('load',async()=>{
-      try{
-        registration=await navigator.serviceWorker.register('/sw.js',{scope:'/',updateViaCache:'none'});
-        const watch=()=>{
-          const worker=registration.installing;
-          worker?.addEventListener('statechange',()=>{
-            if(worker.state==='installed'&&navigator.serviceWorker.controller){showUpdate();notify();}
-          });
-        };
-        registration.addEventListener('updatefound',watch);watch();showUpdate();notify();
-      }catch{} // Normal browser reading still works if storage/registration fails.
+      try{await initialize();}catch{} // Normal browser reading still works if storage/registration fails.
     },{once:true});
   }
   setInterval(check,3600_000);
-  return {panel};
+  return {panel,updateControl};
 })();
