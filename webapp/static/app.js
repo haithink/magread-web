@@ -1760,7 +1760,7 @@ async function analyzeSelection(reader) {
   const diagnostic=readerDiagnostics.start();
   const output=el('div',{},el('p',{class:'quote'},chosen.quote),el('p',{class:'muted'},'正在准备句子讲解…'));
   const sheet=showSheet('句子讲解',output,{reader,paragraph:chosen.paragraph,status:'正在准备句子讲解…'});
-  const cacheKey='analysis:'+JSON.stringify([baseFor(reader),reader.contentVersion,state.modelRevision,chosen.quote]);
+  const cacheKey='analysis:'+JSON.stringify([2,baseFor(reader),reader.contentVersion,state.modelRevision,chosen.quote]);
   diagnostic.step('cache-read');
   const cached=await ReadingCache.get(cacheKey);
   diagnostic.step('cache-ready');

@@ -927,13 +927,18 @@ def _analysis_partial(analysis: dict) -> bool:
 
 
 def analyze(meta, article, sentence, before, after, cfg, on_progress=None):
-    cached = store.load_analysis(meta["id"], sentence, article["index"])
-    if cached and not _analysis_partial(cached):
-        return cached
-    started = time.monotonic()
     request_cfg = dict(cfg)
     if "deepseek" in (cfg.get("model") or "").lower():
-        request_cfg["thinkingMode"] = "disabled"
+        request_cfg["thinkingMode"] = "enabled"
+        request_cfg["reasoningEffort"] = "medium"
+    cached = store.load_analysis(meta["id"], sentence, article["index"])
+    stats = (cached or {}).get("generationStats") or {}
+    matches_thinking = request_cfg.get("reasoningEffort") != "medium" or (
+        stats.get("model") == request_cfg.get("model") and stats.get("thinkingMode") == "enabled"
+        and stats.get("reasoningEffort") == "medium")
+    if cached and matches_thinking and not _analysis_partial(cached):
+        return cached
+    started = time.monotonic()
     attempt, first_text_ms = 0, None
 
     def progress(chars):
@@ -989,6 +994,7 @@ def analyze(meta, article, sentence, before, after, cfg, on_progress=None):
         "modelMs": model_ms, "firstTextMs": first_text_ms,
         "calls": attempt, "outputChars": len(raw),
         "model": cfg.get("model", ""), "thinkingMode": request_cfg.get("thinkingMode", "default"),
+        "reasoningEffort": request_cfg.get("reasoningEffort", "default"),
     }
     analysis["partial"] = _analysis_partial(analysis)
     if not analysis["partial"]:

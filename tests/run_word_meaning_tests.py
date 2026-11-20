@@ -13,6 +13,7 @@ class MeaningTests(unittest.TestCase):
     def setUpClass(cls):
         WebTests.setUpClass()
         cls.app, cls.authcode = WebTests.app, WebTests.authcode
+        cls.config_password = WebTests.config_password
         cls.baseline_settings=config.load_settings()
 
     @classmethod

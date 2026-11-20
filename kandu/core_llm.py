@@ -93,6 +93,12 @@ def _body(cfg, system, user, max_tokens, temperature, stream):
     # 由调用任务显式选择，避免简单词汇任务耗尽预算仍只有推理内容。
     if cfg.get("thinkingMode") in ("enabled", "disabled"):
         b["thinking"] = {"type": cfg["thinkingMode"]}
+    effort = cfg.get("reasoningEffort")
+    if cfg.get("thinkingMode") == "enabled" and effort:
+        if cfg.get("provider") == "anthropic":
+            b["output_config"] = {"effort": effort}
+        else:
+            b["reasoning_effort"] = effort
     if stream:
         b["stream"] = True
     if cfg.get("provider") == "anthropic":
