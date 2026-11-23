@@ -777,6 +777,7 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare
         data = config.load_settings()
         return jsonify(vocabLevel=data['vocabLevel'], models=[dict(name=p.get('name', ''), model=p.get('model', ''),
             provider=p.get('provider', 'openai'), baseUrl=p.get('baseUrl', ''),
+            thinkingLevel=p.get('thinkingLevel', 'auto'),
             hasApiKey=bool(p.get('apiKey')), configured=llm.is_complete(p)) for p in data.get('llms', [])],
             defaultModel=config.default_llm_name(data), version=__version__)
 
@@ -795,7 +796,8 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare
                 if index is None:
                     abort(404, '模型配置已改变，请刷新后重试')
                 cfg = dict(current['llms'][index])
-                for key, limit in [('name', 80), ('provider', 20), ('baseUrl', 4000), ('model', 200), ('apiKey', 8192)]:
+                for key, limit in [('name', 80), ('provider', 20), ('baseUrl', 4000), ('model', 200), ('apiKey', 8192),
+                                   ('thinkingLevel', 20)]:
                     if key not in changes:
                         continue
                     value = changes[key]
@@ -808,6 +810,8 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare
                     abort(400, '配置名称不能为空')
                 if cfg.get('provider', 'openai') not in ('openai', 'anthropic'):
                     abort(400, '未知接口类型')
+                if cfg.get('thinkingLevel', 'auto') not in llm.THINKING_LEVELS:
+                    abort(400, '未知思考强度')
                 if cfg['name'] != original and cfg['name'] in config.llm_names(current):
                     abort(409, '已有同名配置，请使用其他名称')
                 if error := llm.validate(cfg):
@@ -824,6 +828,10 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare
                 if not parsed:
                     abort(400, '无法识别配置 JSON')
                 cfg, _ = parsed
+                level = data.get('thinkingLevel', 'auto')
+                if not isinstance(level, str) or level not in llm.THINKING_LEVELS:
+                    abort(400, '未知思考强度')
+                cfg['thinkingLevel'] = level
                 if error := llm.validate(cfg):
                     abort(400, error)
                 name = str(data.get('name') or cfg['model']).strip()[:80]

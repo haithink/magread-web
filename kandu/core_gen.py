@@ -757,9 +757,7 @@ def generate_vocab(meta, article, level, cfg, on_progress=None, on_chars=None, l
             candidate_count = sum(len(cand[idx]) + len(phrase_required[idx]) for idx, _ in remaining)
             budget = min(8192, max(2048, 512 + candidate_count * 110
                                   + sum(len(text) for _, text in remaining) // 3))
-            request_cfg = dict(config)
-            if "deepseek" in (config.get("model") or "").lower():
-                request_cfg["thinkingMode"] = "disabled"
+            request_cfg = llm.thinking_config(config, deepseek_mode='disabled')
             with lock:
                 stats["requests"] += 1
                 stats["inputChars"] += len(system) + len(user)
@@ -934,16 +932,8 @@ def analyze(meta, article, sentence, before, after, cfg, on_progress=None, *,
     from . import core_sentence
     from .core_grammar import normalize_components
     import json
-    request_cfg = dict(cfg)
-    from urllib.parse import urlsplit
-    is_deepseek = ("deepseek" in (cfg.get("model") or "").lower()
-                   or (urlsplit(cfg.get("baseUrl") or '').hostname or '').lower() == 'api.deepseek.com')
-    if is_deepseek:
-        request_cfg["thinkingMode"] = "enabled" if deep else "disabled"
-        if deep:
-            request_cfg["reasoningEffort"] = "medium"
-        else:
-            request_cfg.pop("reasoningEffort", None)
+    request_cfg = llm.thinking_config(cfg, deepseek_mode='enabled' if deep else 'disabled',
+                                      deepseek_effort='medium' if deep else None)
     cached = store.load_analysis(meta["id"], sentence, article["index"], cache_identity)
     if cached and not force and not deep and not _analysis_partial(cached):
         return cached

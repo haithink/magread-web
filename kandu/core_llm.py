@@ -5,6 +5,7 @@ import re
 import time
 import threading
 from contextlib import contextmanager
+from urllib.parse import urlsplit
 
 import requests
 
@@ -51,6 +52,29 @@ class RequestControl:
 
 
 TIMEOUT = (20, 300)
+THINKING_LEVELS = ('auto', 'disabled', 'low', 'medium', 'high')
+
+
+def is_deepseek(cfg):
+    return ('deepseek' in (cfg.get('model') or '').lower()
+            or (urlsplit(cfg.get('baseUrl') or '').hostname or '').lower() == 'api.deepseek.com')
+
+
+def thinking_config(cfg, *, deepseek_mode=None, deepseek_effort=None):
+    """Apply task defaults first, then the user's per-model override; never mutate settings."""
+    result = dict(cfg)
+    if deepseek_mode and is_deepseek(cfg):
+        result['thinkingMode'] = deepseek_mode
+        result.pop('reasoningEffort', None)
+        if deepseek_effort:
+            result['reasoningEffort'] = deepseek_effort
+    level = cfg.get('thinkingLevel', 'auto')
+    if level == 'disabled':
+        result['thinkingMode'] = 'disabled'
+        result.pop('reasoningEffort', None)
+    elif level in ('low', 'medium', 'high'):
+        result.update(thinkingMode='enabled', reasoningEffort=level)
+    return result
 
 
 def endpoint(cfg: dict) -> str:
@@ -85,6 +109,7 @@ def validate(cfg: dict) -> str | None:
 
 
 def _body(cfg, system, user, max_tokens, temperature, stream):
+    cfg = thinking_config(cfg)
     b = {
         "model": cfg["model"].strip(),
         "temperature": temperature,
@@ -99,6 +124,20 @@ def _body(cfg, system, user, max_tokens, temperature, stream):
             b["output_config"] = {"effort": effort}
         else:
             b["reasoning_effort"] = effort
+    # Explicit choices use each protocol's native fields. Keep existing payloads
+    # unchanged for 'auto', including gateway-specific legacy configuration.
+    level = cfg.get('thinkingLevel', 'auto')
+    if level in THINKING_LEVELS and level != 'auto' and not is_deepseek(cfg):
+        if cfg.get('provider') == 'anthropic':
+            if level != 'disabled':
+                b['thinking'] = {'type': 'adaptive'}
+                b.pop('temperature', None)
+        else:
+            b.pop('thinking', None)
+            b['reasoning_effort'] = 'none' if level == 'disabled' else level
+            if re.match(r'(?i)(?:gpt-[5-9](?:[.\-]|$)|o[1-9](?:[\-]|$))', cfg['model']):
+                b['max_completion_tokens'] = b.pop('max_tokens')
+                b.pop('temperature', None)
     if stream:
         b["stream"] = True
     if cfg.get("provider") == "anthropic":
@@ -329,9 +368,7 @@ def conversation(cfg, system, messages, on_text=None, control=None):
             m.get("role") not in {"user", "assistant"} or not isinstance(m.get("content"), str)
             for m in messages):
         raise LlmError("对话消息结构无效")
-    request_cfg = dict(cfg)
-    if "deepseek" in request_cfg.get("model", "").lower():
-        request_cfg["thinkingMode"] = "disabled"
+    request_cfg = thinking_config(cfg, deepseek_mode='disabled')
     state = _StreamState(on_text=on_text, control=control)
     try:
         _stream_once(request_cfg, system, messages, 4096, .3, state)
@@ -368,6 +405,10 @@ def _looks_truncated(body: str) -> bool:
 def _is_budget_reject(text: str) -> bool:
     """网关对 max_tokens 超限/非法的拒绝（各家中转措辞不一，取并集）。"""
     t = (text or "").lower()
+    # Unsupported thinking settings cannot be repaired by reducing max_tokens.
+    if (any(field in t for field in ('thinking', 'reasoning_effort', 'output_config', 'effort'))
+            and not any(field in t for field in ('max_tokens', 'max_output_tokens', 'max_completion_tokens'))):
+        return False
     keys = ("max_tokens", "max_output_tokens", "max output", "output token",
             "maximum", "too large", "out of range", "must be less than",
             "must be greater than", "invalid_request_error")

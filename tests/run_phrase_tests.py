@@ -100,6 +100,21 @@ class PhraseTests(unittest.TestCase):
         # Combined generation does not disable the explicit, independent phrase pass.
         self.assertEqual(gen.phrase_pending(result, ARTICLE, 0), 1)
 
+    def test_explicit_model_thinking_level_overrides_vocabulary_default(self):
+        for level in ['disabled', 'low', 'medium', 'high']:
+            with self.subTest(level=level):
+                store.save_vocab('sample', dict(articleIndex=0, level='cet4'))
+                cfg = dict(self.cfg, thinkingLevel=level)
+                before = copy.deepcopy(cfg)
+                with patch.object(llm, 'chat', return_value=self.response()) as chat:
+                    gen.generate_vocab(WebTests.meta, ARTICLE, 'cet4', cfg)
+                    self.assertGreater(chat.call_count, 0)
+                    for call in chat.call_args_list:
+                        request = call.args[0]
+                        self.assertEqual(request['thinkingMode'], 'disabled' if level == 'disabled' else 'enabled')
+                        self.assertEqual(request.get('reasoningEffort'), None if level == 'disabled' else level)
+                self.assertEqual(cfg, before)
+
     def test_omitted_phrase_has_fallback_and_can_be_refined(self):
         with patch.object(llm, 'chat', return_value=self.response()):
             result = gen.generate_vocab(WebTests.meta, ARTICLE, 'cet4', self.cfg)

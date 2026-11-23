@@ -27,6 +27,8 @@ def context(article, paragraph, sentence, start=None):
 
 def identity(context, cfg):
     model = [cfg.get(k, '') for k in ('provider', 'baseUrl', 'model')]
+    if cfg.get('thinkingLevel', 'auto') != 'auto':
+        model.append(cfg['thinkingLevel'])
     return hashlib.sha256(json.dumps([CONTEXT_VERSION, context, model],
         ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 

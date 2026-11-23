@@ -1800,7 +1800,7 @@ async function analyzeSelection(reader) {
   const review=button('深度复核',action(()=>request(true)));
   const controls=el('div',{class:'analysis-actions'},again,review);
   const setBusy=value=>{busy=value;again.disabled=value;review.disabled=value;};setBusy(true);
-  const output=el('div',{},controls,el('p',{class:'analysis-help muted'},'默认快速讲解。深度复核会重新核对；DeepSeek 会开启思考，等待更久。'),status,result,preview);
+  const output=el('div',{},controls,el('p',{class:'analysis-help muted'},'深度复核会重新核对。思考强度以模型设置为准；沿用默认时，DeepSeek 普通讲解关闭思考，深度复核使用 medium。'),status,result,preview);
   const sheet=showSheet('句子讲解',output,{reader,paragraph:chosen.paragraph,status:'正在准备句子讲解…'});
   const cacheKey='analysis:'+JSON.stringify([3,baseFor(reader),reader.contentVersion,state.modelRevision,chosen.paragraph,chosen.start??null,chosen.quote]);
   const clearPreview=()=>{preview.hidden=true;preview.replaceChildren();signature='';
@@ -1968,14 +1968,16 @@ async function settingsPage(token) {
   const settings=await api('/settings');if(token!==state.route)return;
   state.settingsTimer=setTimeout(()=>{if(token===state.route)route();},Math.max(0,access.expiresAt-Date.now())+100);
   const models=el('div');
-  for(const item of settings.models)models.append(el('div',{class:'model-item'},el('div',{},item.name,el('small',{},item.provider+' · '+item.model)),
+  for(const item of settings.models)models.append(el('div',{class:'model-item'},el('div',{},item.name,el('small',{},item.provider+' · '+item.model+' · 思考：'+(THINKING_LABELS[item.thinkingLevel||'auto']||'沿用当前默认'))),
     el('div',{class:'model-actions'},button('编辑',()=>editModel(item)),
       button(item.name===settings.defaultModel?'默认模型':'设为默认',action(async()=>{await api('/settings',{method:'POST',data:{defaultModel:item.name}});route();}),item.name===settings.defaultModel?'secondary':''))));
   if(!settings.models.length)models.append(el('p',{class:'muted'},'尚未配置模型。已有的阅读结果仍可浏览。'));
   const name=el('input',{placeholder:'配置名称（可留空）'}),json=el('textarea',{placeholder:'粘贴完整 cc-switch / Claude Code / OpenAI 配置 JSON',rows:7,spellcheck:false,autocomplete:'off'});
+  const thinking=thinkingSelect();
   const form=el('form',{class:'form-stack'},el('label',{},'名称',name),el('label',{},'配置 JSON',json),
+    el('label',{},'思考强度',thinking),thinkingHelp(),
     el('small',{class:'muted'},'密钥只保存在服务器，不会回传到页面。'),el('button',{type:'submit',class:'primary'},'保存并设为默认'));
-  form.onsubmit=action(async event=>{event.preventDefault();await api('/settings',{method:'POST',data:{name:name.value,configJson:json.value}});json.value='';toast('模型配置已保存');route();});
+  form.onsubmit=action(async event=>{event.preventDefault();await api('/settings',{method:'POST',data:{name:name.value,configJson:json.value,thinkingLevel:thinking.value}});json.value='';toast('模型配置已保存');route();});
   modelPanels.append(el('section',{class:'panel'},el('h2',{},'模型配置'),
     el('p',{class:'muted'},'已临时解锁，到期后自动锁定。'),
     button('立即锁定模型配置',action(async()=>{await api('/settings/lock',{method:'POST',data:{}});route();})),models),
@@ -2091,25 +2093,34 @@ async function readingStatsPage(token) {
   applyData(initial);ReadingSync.drain().catch(()=>{});
 }
 
+const THINKING_LABELS={auto:'沿用当前默认',disabled:'关闭思考',low:'低 · low',medium:'中 · medium',high:'高 · high'};
+function thinkingSelect(value='auto'){
+  const select=el('select',{'aria-label':'思考强度'},...Object.entries(THINKING_LABELS).map(([key,label])=>el('option',{value:key},label)));
+  select.value=value in THINKING_LABELS?value:'auto';return select;
+}
+function thinkingHelp(){
+  return el('small',{class:'muted'},'默认保持现有行为：DeepSeek 的普通句子讲解、生词、查词和讨论关闭思考，深度复核使用 medium；其他请求沿用接口默认。主动选档后应用于此模型的所有 AI 请求，包括深度复核。支持程度取决于模型与接口；DeepSeek 将 medium 和 high 都映射为 high，low 为较低档。提高强度可能增加等待时间。已有结果不会自动重做，可点击重新讲解。');
+}
 function editModel(initial) {
   const name=el('input',{value:initial.name,required:true,maxlength:80,autocomplete:'off'});
   const provider=el('select',{'aria-label':'接口类型'},el('option',{value:'openai'},'OpenAI 兼容'),el('option',{value:'anthropic'},'Anthropic 兼容'));
   provider.value=initial.provider;
   const baseUrl=el('input',{type:'url',value:initial.baseUrl,required:true,maxlength:4000,spellcheck:false});
   const model=el('input',{value:initial.model,required:true,maxlength:200,spellcheck:false});
+  const thinking=thinkingSelect(initial.thinkingLevel||'auto');
   const key=el('input',{type:'password',autocomplete:'new-password',spellcheck:false,maxlength:8192,
     required:!initial.hasApiKey,placeholder:initial.hasApiKey?'已保存，留空保留原密钥':'输入 API Key'});
   const submit=el('button',{type:'submit',class:'primary'},'保存模型配置');
   const error=el('p',{class:'error',role:'alert',hidden:true});
   const form=el('form',{class:'form-stack'},el('label',{},'配置名称',name),el('label',{},'接口类型',provider),
-    el('label',{},'API 地址',baseUrl),el('label',{},'模型名称',model),el('label',{},'API Key',key),
+    el('label',{},'API 地址',baseUrl),el('label',{},'模型名称',model),el('label',{},'思考强度',thinking),thinkingHelp(),el('label',{},'API Key',key),
     el('small',{class:'muted'},'原密钥不会回传到页面。留空保留，填写新密钥则替换。'),error,
     el('div',{class:'row'},submit,button('取消',()=>closeSheet())));
   form.onsubmit=async event=>{
     event.preventDefault();submit.disabled=true;error.hidden=true;
     try {
       await api('/settings',{method:'POST',data:{originalName:initial.name,modelConfig:{name:name.value,
-        provider:provider.value,baseUrl:baseUrl.value,model:model.value,apiKey:key.value}}});
+        provider:provider.value,baseUrl:baseUrl.value,model:model.value,thinkingLevel:thinking.value,apiKey:key.value}}});
       key.value='';closeSheet();toast('模型配置已更新');await route();
     } catch(failure) {error.textContent=failure.message;error.hidden=false;}
     finally {submit.disabled=false;}
