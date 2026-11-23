@@ -929,14 +929,12 @@ def _analysis_partial(analysis: dict) -> bool:
 def analyze(meta, article, sentence, before, after, cfg, on_progress=None):
     request_cfg = dict(cfg)
     if "deepseek" in (cfg.get("model") or "").lower():
-        request_cfg["thinkingMode"] = "enabled"
-        request_cfg["reasoningEffort"] = "medium"
+        request_cfg["thinkingMode"] = "disabled"
+        request_cfg.pop("reasoningEffort", None)
     cached = store.load_analysis(meta["id"], sentence, article["index"])
-    stats = (cached or {}).get("generationStats") or {}
-    matches_thinking = request_cfg.get("reasoningEffort") != "medium" or (
-        stats.get("model") == request_cfg.get("model") and stats.get("thinkingMode") == "enabled"
-        and stats.get("reasoningEffort") == "medium")
-    if cached and matches_thinking and not _analysis_partial(cached):
+    # Complete explanations remain useful regardless of the earlier thinking
+    # policy. Reuse them immediately rather than spending another model call.
+    if cached and not _analysis_partial(cached):
         return cached
     started = time.monotonic()
     attempt, first_text_ms = 0, None

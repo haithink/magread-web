@@ -29,42 +29,46 @@ class SentenceThinkingTests(unittest.TestCase):
     def analyze(self, cfg):
         return gen.analyze(WebTests.meta, WebTests.article, self.sentence, '', '', cfg)
 
-    def test_both_deepseek_protocols_send_medium_and_upgrade_old_results(self):
+    def test_both_deepseek_protocols_disable_thinking_and_drop_inherited_effort(self):
         for provider, model in [('openai', 'deepseek-flash'), ('anthropic', 'deepseek-v4-flash')]:
             with self.subTest(provider=provider):
-                cfg=dict(provider=provider, model=model, thinkingMode='disabled')
+                self.path.unlink(missing_ok=True)
+                cfg=dict(provider=provider, model=model, thinkingMode='enabled', reasoningEffort='medium')
                 original=copy.deepcopy(cfg)
-                old=copy.deepcopy(self.result)
-                old['generationStats']=dict(model=model, thinkingMode='disabled')
-                store.save_analysis('sample', self.sentence, 0, old)
                 def respond(request_cfg, system, user, **kwargs):
                     body=llm._body(request_cfg, system, user, kwargs['max_tokens'], .3, True)
-                    self.assertEqual(body['thinking'], {'type':'enabled'})
-                    if provider=='anthropic':
-                        self.assertEqual(body['output_config'], {'effort':'medium'})
-                        self.assertNotIn('reasoning_effort',body)
-                    else:
-                        self.assertEqual(body['reasoning_effort'],'medium')
-                        self.assertNotIn('output_config',body)
+                    self.assertEqual(body['thinking'], {'type':'disabled'})
+                    self.assertNotIn('reasoningEffort',request_cfg)
+                    self.assertNotIn('reasoning_effort',body)
+                    self.assertNotIn('output_config',body)
                     return json.dumps(self.result, ensure_ascii=False)
                 with patch.object(llm,'chat',side_effect=respond) as chat:
                     result=self.analyze(cfg)
-                    self.assertEqual(result['generationStats']['thinkingMode'],'enabled')
-                    self.assertEqual(result['generationStats']['reasoningEffort'],'medium')
+                    self.assertEqual(result['generationStats']['thinkingMode'],'disabled')
+                    self.assertEqual(result['generationStats']['reasoningEffort'],'default')
                     self.assertFalse(result['partial'])
                     self.assertEqual(self.analyze(cfg),result)
                     self.assertEqual(chat.call_count,1)
                 self.assertEqual(cfg,original)
 
-    def test_old_enabled_without_effort_and_other_model_cache_regenerate(self):
+    def test_existing_complete_explanations_reuse_cache_without_model_calls(self):
         cfg=dict(provider='openai',model='deepseek-flash')
-        for stats in [dict(model='deepseek-flash',thinkingMode='enabled'),
+        for stats in [{}, dict(model='deepseek-flash',thinkingMode='disabled'),
+                      dict(model='deepseek-flash',thinkingMode='enabled',reasoningEffort='medium'),
                       dict(model='deepseek-v4-pro',thinkingMode='enabled',reasoningEffort='medium')]:
             with self.subTest(stats=stats):
-                store.save_analysis('sample',self.sentence,0,dict(self.result,generationStats=stats))
-                with patch.object(llm,'chat',return_value=json.dumps(self.result)) as chat:
-                    self.analyze(cfg)
-                    self.assertEqual(chat.call_count,1)
+                cached=dict(self.result,generationStats=stats)
+                store.save_analysis('sample',self.sentence,0,cached)
+                with patch.object(llm,'chat',side_effect=AssertionError('Complete cache should be reused')):
+                    self.assertEqual(self.analyze(cfg),cached)
+
+    def test_incomplete_cache_regenerates_without_thinking(self):
+        store.save_analysis('sample',self.sentence,0,dict(self.result,translation=''))
+        with patch.object(llm,'chat',return_value=json.dumps(self.result)) as chat:
+            result=self.analyze(dict(provider='openai',model='DeepSeek-V4-Flash'))
+            self.assertEqual(chat.call_count,1)
+            self.assertEqual(chat.call_args.args[0]['thinkingMode'],'disabled')
+            self.assertFalse(result['partial'])
 
     def test_other_models_keep_cached_results_and_default_payload(self):
         cfg=dict(provider='openai',model='gpt-6.1-sol')
