@@ -9,6 +9,8 @@ from kandu import core_wordbook as wordbook
 
 def selection(article, paragraph, quote, start=None):
     word = wordbook.normalize(quote)
+    if len(word.split()) > 3:
+        raise ValueError('查词并收藏支持单个单词或 2–3 个单词的短语；更长内容请使用句子讲解')
     if type(paragraph) is not int or not 0 <= paragraph < len(article['paragraphs']):
         raise ValueError('段落编号无效')
     text = article['paragraphs'][paragraph]

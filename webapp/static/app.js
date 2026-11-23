@@ -1066,8 +1066,9 @@ function clearReaderSelection(reader,clearNative=false) {
   const bar=$('#selection-tools');if(bar)bar.hidden=true;
   if(clearNative)getSelection()?.removeAllRanges();
 }
-function isSingleSelectedWord(quote) {
-  return /^[A-Za-z]+(?:['’‘-][A-Za-z]+)*$/.test(quote.trim());
+function isLookupSelection(quote) {
+  // One word, or a short phrase of two/three words; sentences use explanation.
+  return /^[A-Za-z]+(?:['’‘-][A-Za-z]+)*(?:\s+[A-Za-z]+(?:['’‘-][A-Za-z]+)*){0,2}$/.test(quote.trim());
 }
 function showReaderSelection(reader,chosen,range,touch=false) {
   reader.hoverHide?.();state.selection=chosen;reader.selectionRange=range;
@@ -1076,7 +1077,7 @@ function showReaderSelection(reader,chosen,range,touch=false) {
   if(touch&&supportsVocabHighlights())CSS.highlights.set('kandu-touch-selection',new Highlight(range));
   const bar=$('#selection-tools');bar.hidden=false;bar.classList.toggle('touch-selection',touch);
   $('span',bar).textContent=chosen.quote;
-  $('#selection-lookup').hidden=!isSingleSelectedWord(chosen.quote);
+  $('#selection-lookup').hidden=!isLookupSelection(chosen.quote);
   $('#selection-expand').hidden=!touch;
   const whole=touch&&chosen.quote===sentenceSelection(reader,chosen).quote;
   $('#selection-expand').disabled=whole;$('#selection-expand').textContent=whole?'已选整句':'选整句';
@@ -1735,7 +1736,7 @@ async function vocabSheet(reader,paragraph) {
 }
 async function lookupSelection(reader) {
   const cacheOwner=state.cacheIdentity;
-  const chosen={...state.selection};if(!chosen.quote||!isSingleSelectedWord(chosen.quote))return;
+  const chosen={...state.selection};if(!chosen.quote||!isLookupSelection(chosen.quote))return;
   const output=el('div',{},el('p',{class:'muted'},'正在查词…'));
   const sheet=showSheet('查词 · 本文含义',output,{reader,paragraph:chosen.paragraph,status:'正在查词…'});
   $('#selection-tools').hidden=true;

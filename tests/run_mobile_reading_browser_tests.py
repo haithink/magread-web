@@ -193,7 +193,7 @@ def main():
                 }''')
                 expect(page.locator('#selection-tools')).to_be_visible()
                 assert page.evaluate('state.selection.quote')=='paper over'
-                expect(page.locator('#selection-lookup')).not_to_be_visible()
+                expect(page.locator('#selection-lookup')).to_be_visible()
                 expect(page.get_by_role('button',name='句子讲解',exact=True)).to_be_visible()
                 assert page.locator('#selection-tools').bounding_box()['y']>height-200
                 shot(page,f'mobile-native-selection-{width}-{height}-{engine}')

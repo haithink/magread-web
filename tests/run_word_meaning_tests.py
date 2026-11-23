@@ -97,6 +97,47 @@ class MeaningTests(unittest.TestCase):
         self.assertLessEqual(len(context['sentence']),5000)
         self.assertIn('moon-bound',context['sentence'])
 
+    def test_two_and_three_word_phrases_context_collection_and_limits(self):
+        article = dict(index=0, title='Uncertainties', paragraphs=[
+            'They paper over problems and fall short of expectations. They paper over problems again.'])
+        store._atomic_json_write(store._cache_dir('sample')/'content.json', dict(
+            bookSize=WebTests.meta['size'], format='epub', articles=[article]))
+        with patch.object(core_dict, 'lookup', return_value={}):
+            for phrase in ['paper over', 'fall short of']:
+                with self.subTest(phrase=phrase):
+                    wordbook.delete(phrase)
+                    request = dict(word=phrase, paragraph=0, start=article['paragraphs'][0].index(phrase))
+                    response = self.post('/books/sample/articles/0/lookup', request)
+                    self.assertEqual(response.status_code, 200, response.json)
+                    self.assertEqual(response.json['saved']['word'], phrase)
+                    self.assertEqual(response.json['saved']['source']['selectedWord'], phrase)
+                    meaning = dict(sense='掩盖' if phrase=='paper over' else '未达到', pos='phr.',
+                        explanation='这里结合宾语表达本文中的实际含义。', translation='他们掩盖问题，而且未达到预期。')
+                    def answer(cfg, system, user, **kwargs):
+                        selected = json.loads(user)
+                        self.assertEqual(selected['word'], phrase)
+                        self.assertIn(phrase, selected['sentence'])
+                        return json.dumps(meaning, ensure_ascii=False)
+                    with patch.object(llm, 'chat', side_effect=answer) as call:
+                        job = self.wait_job(self.post('/books/sample/articles/0/lookup-context',
+                            dict(request, savedWord=phrase)))
+                        self.assertEqual(job['state'], 'done', job)
+                        self.assertEqual(wordbook.get(phrase)['source']['contextMeaning']['sense'], meaning['sense'])
+                        cached = self.post('/books/sample/articles/0/lookup', request).json
+                        self.assertEqual(cached['contextMeaning']['sense'], meaning['sense'])
+                        self.assertEqual(call.call_count, 1)
+            first = word_meaning.selection(article, 0, 'paper over', article['paragraphs'][0].index('paper over'))
+            second = word_meaning.selection(article, 0, 'paper over', article['paragraphs'][0].rindex('paper over'))
+            self.assertNotEqual(word_meaning.cache_key(first, {}), word_meaning.cache_key(second, {}))
+            for quote in ['paper over problems and', 'They paper over problems and fall short of expectations.', 'paper, over']:
+                with self.subTest(quote=quote):
+                    for path in ['/lookup', '/lookup-context']:
+                        with patch.object(llm, 'chat') as call:
+                            response = self.post('/books/sample/articles/0'+path, dict(word=quote, paragraph=0))
+                            self.assertEqual(response.status_code, 400, response.json)
+                            call.assert_not_called()
+        self.assertEqual(word_meaning.selection(article, 0, 'paper\n over')['word'], 'paper over')
+
     def test_malformed_response_is_not_cached_and_can_retry(self):
         self.lookup()
         with patch.object(llm,'chat',return_value='{"sense":"截断'):

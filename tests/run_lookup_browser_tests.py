@@ -9,21 +9,22 @@ from wsgiref.simple_server import make_server
 
 from playwright.sync_api import sync_playwright, expect
 from run_web_tests import WebTests, config, store, llm, core_dict
+from run_mobile_reading_browser_tests import BrowserServer
 
 
-def select_word(page, paragraph, at_bottom=False):
+def select_word(page, paragraph, at_bottom=False, quote='bound'):
     page.locator(f'#para-{paragraph} p').scroll_into_view_if_needed()
-    page.evaluate('''({paragraph,bottom}) => {
+    page.evaluate('''({paragraph,bottom,quote}) => {
         const p=document.querySelector(`#para-${paragraph} p`);
         p.scrollIntoView({block:'center',behavior:'instant'});
         const walker=document.createTreeWalker(p,NodeFilter.SHOW_TEXT);
         let node;while(node=walker.nextNode()) {
-            const start=node.textContent.indexOf('bound');if(start<0)continue;
-            const range=document.createRange();range.setStart(node,start);range.setEnd(node,start+5);
+            const start=node.textContent.indexOf(quote);if(start<0)continue;
+            const range=document.createRange();range.setStart(node,start);range.setEnd(node,start+quote.length);
             if(bottom)scrollBy({top:range.getBoundingClientRect().bottom-innerHeight+30,behavior:'instant'});
             const selection=getSelection();selection.removeAllRanges();selection.addRange(range);break;
         }
-    }''',dict(paragraph=paragraph,bottom=at_bottom))
+    }''',dict(paragraph=paragraph,bottom=at_bottom,quote=quote))
     expect(page.locator('#selection-tools')).to_be_visible()
     page.wait_for_timeout(1100)
     metrics=page.evaluate('''() => {
@@ -52,33 +53,37 @@ def screenshot(page,name):
 def main():
     WebTests.setUpClass()
     text=('A fully loaded, moon-bound Starship expends almost all of its fuel to get to low Earth orbit. '
-          'So that Starship needs to refill its tank before it heads to the moon, requiring the launch of more and more refueling Starships. ')
+          'So that Starship needs to refill its tank before it heads to the moon, requiring the launch of more and more refueling Starships. '
+          'They paper over problems and fall short of expectations. ')
     article=dict(index=0,title='A trip to the moon',paragraphs=[text+f'Reading note {i}.' for i in range(16)])
     store._atomic_json_write(config.app_dir()/'cache/sample/content.json',dict(
         bookSize=WebTests.meta['size'],format='epub',articles=[article]))
     calls=[]
     def chat(cfg,system,user,**kwargs):
         context=json.loads(user);calls.append(context)
-        assert context['word']=='bound'
-        assert 'moon-bound' in context['sentence']
+        assert context['word'] in ['bound', 'paper over', 'fall short of']
+        assert ('moon-bound' if context['word']=='bound' else context['word']) in context['sentence']
         kwargs['on_delta'](50)
         time.sleep(.3)
-        return json.dumps(dict(sense='驶向月球的；以月球为目的地的',pos='形容词后缀',
+        return json.dumps(dict(sense='驶向月球的；以月球为目的地的' if context['word']=='bound' else '短语的本文义',pos='形容词后缀',
             explanation='bound 与 moon 构成 moon-bound，表示目的地是月球，并非“界限”。',
             translation='一艘满载、驶向月球的星舰为了进入近地轨道，几乎耗尽了全部燃料。'),ensure_ascii=False)
-    server=make_server('127.0.0.1',0,WebTests.app)
+    server=make_server('127.0.0.1',0,WebTests.app,server_class=BrowserServer)
     thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
     base=f'http://127.0.0.1:{server.server_port}'
     errors=[]
     try:
         with (sync_playwright() as playwright,patch.object(llm,'chat',side_effect=chat),
               patch.object(core_dict,'ensure_db'),patch.object(core_dict,'lookup_many',return_value={}),
-              patch.object(core_dict,'lookup',return_value=dict(word='bound',lemma='bound',translation='界限；受约束的'))):
+              patch.object(core_dict,'lookup',side_effect=lambda word:dict(word='bound',lemma='bound',translation='界限；受约束的') if word=='bound' else {})):
             chrome=os.environ.get('KANDU_TEST_CHROME')
-            browser=playwright.chromium.launch(headless=True,**({'executable_path':chrome} if chrome else {}))
+            engine=os.environ.get('KANDU_TEST_ENGINE','chromium')
+            expect.set_options(timeout=15000 if engine=='webkit' else 5000)
+            browser=getattr(playwright,engine).launch(headless=True,
+                **({'executable_path':chrome} if chrome and engine=='chromium' else {}))
             for mobile in [False,True]:
                 context=browser.new_context(viewport={'width':390 if mobile else 1440,'height':844 if mobile else 1000},
-                    is_mobile=mobile,has_touch=mobile)
+                    is_mobile=mobile,has_touch=mobile,service_workers='block')
                 context.add_init_script("localStorage.setItem('kandu-touch-mode','select')")
                 page=context.new_page();page.on('pageerror',lambda error:errors.append(str(error)))
                 page.goto(base+'/#/read/sample/0')
@@ -109,12 +114,29 @@ def main():
                 expect(page.locator('.lookup-context .context-sense')).to_be_visible()
                 assert len(calls)==count,'Same occurrence should use cached meaning'
                 page.locator('#sheet-close').click()
+                for phrase in ['paper over', 'fall short of']:
+                    before_phrase=select_word(page,8,at_bottom=mobile,quote=phrase)
+                    expect(page.locator('#selection-lookup')).to_be_visible()
+                    lookup=page.locator('#selection-lookup')
+                    lookup.tap() if mobile else lookup.click()
+                    expect(page.locator('.lookup-context .context-sense')).to_have_text('短语的本文义')
+                    assert store.load_reading_history('sample')['0']['title']==article['title']
+                    page.locator('#sheet-close').click()
+                    assert page.evaluate('scrollY')==before_phrase['y']
+                select_word(page,8,at_bottom=mobile,quote='They paper over problems')
+                expect(page.locator('#selection-lookup')).not_to_be_visible()
+                # Even invoking the entry directly must not collect a sentence.
+                count=len(calls)
+                page.evaluate('lookupSelection(state.reader)')
+                expect(page.locator('#sheet')).not_to_be_visible()
+                assert len(calls)==count
+                page.get_by_role('button',name='关闭选词操作').click()
                 page.get_by_role('link',name='生词本',exact=True).click()
-                expect(page.locator('.word-source .context-sense')).to_have_text('驶向月球的；以月球为目的地的')
+                expect(page.locator('.word-source .context-sense')).to_contain_text(['短语的本文义','短语的本文义','驶向月球的；以月球为目的地的'])
                 context.close()
             assert not errors,errors
             browser.close()
-            print('LOOKUP BROWSER PASS: desktop + touch phone, nearby anchored toolbar, viewport clamp/flip, contextual meaning/translation, saved source, cached reuse, unchanged scroll and reading progress')
+            print(f'LOOKUP BROWSER PASS: {engine}, desktop + touch phone, single word and 2/3-word phrases, longer selections blocked, contextual meaning/translation, saved source, cached reuse, unchanged scroll and reading progress')
     finally:
         server.shutdown();server.server_close();thread.join(timeout=5)
         WebTests.tearDownClass()
