@@ -333,16 +333,19 @@ class VocabValidationError(GenError):
         super().__init__("；".join(f"段落 {i}: {text}" for i, text in errors.items())[:500])
 
 
-def _chat_retry(cfg, system, user, max_tokens, on_chars=None, attempts=2, on_attempt=None):
+def _chat_retry(cfg, system, user, max_tokens, on_chars=None, attempts=2, on_attempt=None,
+                **kwargs):
     last = None
     for i in range(attempts):
         if on_attempt:
             on_attempt(i + 1)
         try:
-            return llm.chat(cfg, system, user, max_tokens=max_tokens, on_delta=on_chars)
+            return llm.chat(cfg, system, user, max_tokens=max_tokens, on_delta=on_chars, **kwargs)
+        except llm.RequestCancelled:
+            raise
         except Exception as e:
             last = e
-            if i == 0:
+            if i + 1 < attempts:
                 time.sleep(1.5)
     raise last if last else GenError("调用失败")
 
@@ -926,15 +929,23 @@ def _analysis_partial(analysis: dict) -> bool:
     )
 
 
-def analyze(meta, article, sentence, before, after, cfg, on_progress=None):
+def analyze(meta, article, sentence, before, after, cfg, on_progress=None, *,
+            context=None, force=False, deep=False, on_partial=None, control=None, cache_identity=''):
+    from . import core_sentence
+    from .core_grammar import normalize_components
+    import json
     request_cfg = dict(cfg)
-    if "deepseek" in (cfg.get("model") or "").lower():
-        request_cfg["thinkingMode"] = "disabled"
-        request_cfg.pop("reasoningEffort", None)
-    cached = store.load_analysis(meta["id"], sentence, article["index"])
-    # Complete explanations remain useful regardless of the earlier thinking
-    # policy. Reuse them immediately rather than spending another model call.
-    if cached and not _analysis_partial(cached):
+    from urllib.parse import urlsplit
+    is_deepseek = ("deepseek" in (cfg.get("model") or "").lower()
+                   or (urlsplit(cfg.get("baseUrl") or '').hostname or '').lower() == 'api.deepseek.com')
+    if is_deepseek:
+        request_cfg["thinkingMode"] = "enabled" if deep else "disabled"
+        if deep:
+            request_cfg["reasoningEffort"] = "medium"
+        else:
+            request_cfg.pop("reasoningEffort", None)
+    cached = store.load_analysis(meta["id"], sentence, article["index"], cache_identity)
+    if cached and not force and not deep and not _analysis_partial(cached):
         return cached
     started = time.monotonic()
     attempt, first_text_ms = 0, None
@@ -952,17 +963,34 @@ def analyze(meta, article, sentence, before, after, cfg, on_progress=None):
         attempt = number
         progress(0)
 
-    user = prompts.analysis_user(sentence, before, after, article["title"])
-    raw = _chat_retry(request_cfg, prompts.analysis_system(), user, 12000,
-                      on_chars=progress, on_attempt=begin)
+    def preview(text):
+        if not on_partial:
+            return
+        obj = core_sentence.partial_object(text)
+        value = {k: obj[k] for k in ('context', 'translation') if isinstance(obj.get(k), str)}
+        if isinstance(obj.get('grammarComponents'), list):
+            value['grammarComponents'] = normalize_components(obj['grammarComponents'], sentence)
+        if isinstance(obj.get('grammarPoints'), list):
+            value['grammarPoints'] = [dict(title=p.get('title', ''), text=p.get('text', ''))
+                for p in obj['grammarPoints'] if isinstance(p, dict)
+                and isinstance(p.get('title', ''), str) and isinstance(p.get('text', ''), str)]
+        on_partial(value)
+
+    user = prompts.analysis_user(sentence, before, after, article["title"], context=context)
+    raw = _chat_retry(request_cfg, prompts.analysis_system(deep=deep), user, 8000 if deep else 5000,
+                      on_chars=progress, on_attempt=begin, attempts=1,
+                      on_text=preview, control=control, require_complete=True)
     model_ms = round((time.monotonic() - started) * 1000)
-    obj = _parse_json(raw, want_array=False)
+    try:
+        obj = json.loads(_extract_json(raw))
+        if not isinstance(obj, dict):
+            raise ValueError('not object')
+    except (ValueError, TypeError):
+        raise GenError('句子讲解返回的 JSON 不完整，请重试；已有讲解已保留') from None
 
     def _s(o, k, default=""):
         v = o.get(k)
         return v if isinstance(v, str) else default
-
-    from .core_grammar import normalize_components
 
     analysis = {
         "vocab": [],
@@ -970,18 +998,18 @@ def analyze(meta, article, sentence, before, after, cfg, on_progress=None):
         "grammarDiagram": _s(obj, "grammarDiagram").replace("\\n", "\n"),
         "grammarPoints": [
             {"title": gp.get("title", ""), "text": gp.get("text", "")}
-            for gp in obj.get("grammarPoints", [])
-            if isinstance(gp, dict)
+            for gp in (obj.get("grammarPoints") or [])
+            if isinstance(gp, dict) and isinstance(gp.get('title', ''), str) and isinstance(gp.get('text', ''), str)
         ],
         "context": _s(obj, "context"),
         "translation": _s(obj, "translation"),
     }
-    for v in obj.get("vocab", []):
-        if isinstance(v, dict) and (v.get("word") or "").strip():
+    for v in (obj.get("vocab") or []):
+        if isinstance(v, dict) and _s(v, "word").strip():
             analysis["vocab"].append(
                 {
                     "word": v["word"].strip(),
-                    "phonetic": (v.get("phonetic") or "").strip(),
+                    "phonetic": _s(v, "phonetic").strip(),
                     "sense": _s(v, "sense"),
                     "note": _s(v, "note"),
                 }
@@ -993,11 +1021,14 @@ def analyze(meta, article, sentence, before, after, cfg, on_progress=None):
         "calls": attempt, "outputChars": len(raw),
         "model": cfg.get("model", ""), "thinkingMode": request_cfg.get("thinkingMode", "default"),
         "reasoningEffort": request_cfg.get("reasoningEffort", "default"),
+        "reviewMode": "deep" if deep else "normal", "contextVersion": core_sentence.CONTEXT_VERSION,
     }
     analysis["partial"] = _analysis_partial(analysis)
-    if not analysis["partial"]:
-        # 残缺结果不落盘：下次双击会自动重试
-        store.save_analysis(meta["id"], sentence, article["index"], analysis)
+    if analysis["partial"]:
+        raise GenError('句子讲解缺少含义、译文或语法结构，请重试；已有讲解已保留')
+    if control:
+        control.check()
+    store.save_analysis(meta["id"], sentence, article["index"], analysis, cache_identity)
     return analysis
 
 

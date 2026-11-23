@@ -582,17 +582,18 @@ def save_vocab(book_id: str, vocab: dict):
     )
 
 
-def analysis_key(book_id: str, article_index: int, text: str) -> str:
-    return hashlib.sha1(f"{book_id}|{article_index}|{text}".encode("utf-8")).hexdigest()
+def analysis_key(book_id: str, article_index: int, text: str, identity='') -> str:
+    key = f"{book_id}|{article_index}|{text}" + (f"|{identity}" if identity else '')
+    return hashlib.sha1(key.encode("utf-8")).hexdigest()
 
 
-def load_analysis(book_id: str, text: str, article_index: int):
-    return _json_read(_cache_dir(book_id) / f"analysis_{analysis_key(book_id, article_index, text)}.json")
+def load_analysis(book_id: str, text: str, article_index: int, identity=''):
+    return _json_read(_cache_dir(book_id) / f"analysis_{analysis_key(book_id, article_index, text, identity)}.json")
 
 
-def save_analysis(book_id: str, text: str, article_index: int, analysis: dict):
-    _json_write(
-        _cache_dir(book_id) / f"analysis_{analysis_key(book_id, article_index, text)}.json",
+def save_analysis(book_id: str, text: str, article_index: int, analysis: dict, identity=''):
+    _atomic_json_write(
+        _cache_dir(book_id) / f"analysis_{analysis_key(book_id, article_index, text, identity)}.json",
         analysis,
     )
 

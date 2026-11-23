@@ -21,6 +21,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 from kandu import core_config as config, core_parsers as store, core_gen as gen
 from kandu import core_llm as llm, core_wordbook as wordbook, core_dict, core_discussion as discussion
+from kandu import core_sentence
 from webapp import __version__
 from webapp import reading_stats
 from webapp import reading_activity
@@ -142,6 +143,7 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare
     app.extensions['jobs'] = jobs
     data_lock = threading.RLock()
     book_locks = {}
+    analysis_locks = [threading.Lock() for _ in range(64)]
     login_limiter = LoginLimiter(root / 'login-rate.sqlite3', auth['secret'])
     config_access = ConfigAccess(root, auth['secret'])
     config_limiter = LoginLimiter(root / 'config-access.sqlite3', auth['secret'], limit=5)
@@ -891,16 +893,25 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare
         para = data.get('paragraph')
         if type(para) is not int or not 0 <= para < len(art['paragraphs']) or not sentence or len(sentence) > 5000 or sentence not in art['paragraphs'][para]:
             abort(400, '请选择同一段落中的原文句子')
+        if any(type(data.get(k, False)) is not bool for k in ('force', 'deep')):
+            abort(400, '讲解模式无效')
+        try:
+            context = core_sentence.context(art, para, sentence, data.get('start'))
+        except ValueError as error:
+            abort(400, str(error))
         cfg = model(data)
+        identity = core_sentence.identity(context, cfg)
+        force, deep = data.get('force', False), data.get('deep', False)
         def work(update, control):
-            with lock_for(book_id):
-                text = art['paragraphs'][para]
-                sents = gen.split_sentences(text)
-                hit = gen.sentence_at(sents, text.find(sentence))
-                before, after = gen.neighbors(sents, hit) if hit else ('', '')
-                return gen.analyze(meta, art, sentence, before, after, cfg, on_progress=lambda p: update(
-                    status=f'已接收 {p["chars"]} 字 · {p["elapsedMs"] / 1000:.0f} 秒'))
-        return accepted(jobs.submit(('analysis', book_id, index, sentence), work))
+            # A sentence must not wait on the book's long vocabulary/digest lock.
+            with analysis_locks[int(identity[:8], 16) % len(analysis_locks)]:
+                control.check()
+                return gen.analyze(meta, art, sentence, '', '', cfg,
+                    context=context, force=force, deep=deep, cache_identity=identity, control=control,
+                    on_partial=lambda value: update(partial=value), on_progress=lambda p: update(
+                        status=(f'正在接收讲解 · {p["chars"]} 字' if p['chars'] else
+                                ('等待深度复核' if deep else '等待模型响应')) + f' · {p["elapsedMs"] / 1000:.0f} 秒'))
+        return accepted(jobs.submit(('analysis', book_id, index, identity, force, deep), work))
 
     @app.get('/api/books/<book_id>/articles/<int:index>/discussion')
     def messages(book_id, index):

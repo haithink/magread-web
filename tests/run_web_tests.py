@@ -324,10 +324,13 @@ class WebTests(unittest.TestCase):
         self.assertEqual(messages[-1]['status'],'stopped')
 
     def test_sentence_analysis_uses_existing_cache(self):
+        from kandu import core_sentence
         sentence=self.article['paragraphs'][0]
         cached=dict(vocab=[],grammarComponents=[dict(text=sentence,label='原句',start=0,end=len(sentence))],
                     grammarPoints=[],translation='这个回答是坦率的。',context='评价回答的态度。')
-        store.save_analysis('sample',sentence,0,cached)
+        cfg=config.load_settings()['llms'][0]
+        identity=core_sentence.identity(core_sentence.context(self.article,0,sentence),cfg)
+        store.save_analysis('sample',sentence,0,cached,identity)
         result=self.wait_job(self.post('/books/sample/articles/0/analyze',dict(sentence=sentence,paragraph=0)))
         self.assertEqual(result['state'],'done',result)
         self.assertEqual(result['result']['translation'],cached['translation'])

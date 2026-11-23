@@ -1791,43 +1791,82 @@ async function analyzeSelection(reader) {
   const cacheOwner=state.cacheIdentity;
   const chosen={...state.selection};if(!chosen.quote)return;
   const diagnostic=readerDiagnostics.start();
-  const output=el('div',{},el('p',{class:'quote'},chosen.quote),el('p',{class:'muted'},'正在准备句子讲解…'));
+  const source={bookId:reader.bookId,index:reader.index,paragraph:chosen.paragraph};
+  const status=el('p',{class:'muted analysis-status',role:'status'},'正在准备句子讲解…');
+  const result=el('div',{},el('p',{class:'quote'},chosen.quote));
+  const preview=el('section',{class:'analysis-preview'});preview.hidden=true;
+  let busy=true,hasResult=false,signature='';
+  const again=button('重新讲解',action(()=>request(false)));
+  const review=button('深度复核',action(()=>request(true)));
+  const controls=el('div',{class:'analysis-actions'},again,review);
+  const setBusy=value=>{busy=value;again.disabled=value;review.disabled=value;};setBusy(true);
+  const output=el('div',{},controls,el('p',{class:'analysis-help muted'},'默认快速讲解。深度复核会重新核对；DeepSeek 会开启思考，等待更久。'),status,result,preview);
   const sheet=showSheet('句子讲解',output,{reader,paragraph:chosen.paragraph,status:'正在准备句子讲解…'});
-  const cacheKey='analysis:'+JSON.stringify([2,baseFor(reader),reader.contentVersion,state.modelRevision,chosen.quote]);
-  diagnostic.step('cache-read');
-  const cached=await ReadingCache.get(cacheKey);
-  diagnostic.step('cache-ready');
-  if(sheet!==state.sheet)return;
-  if(cached){diagnostic.step('render');renderAnalysis(output,cached.value,chosen.quote,{bookId:reader.bookId,index:reader.index,paragraph:chosen.paragraph});finishSheetWait(sheet);diagnostic.step('rendered');return;}
-  const failure=message=>{diagnostic.step('failure');if(sheet!==state.sheet)return;output.replaceChildren(el('p',{class:'quote'},chosen.quote),el('p',{class:'error'},message));finishSheetWait(sheet);};
-  try {
+  const cacheKey='analysis:'+JSON.stringify([3,baseFor(reader),reader.contentVersion,state.modelRevision,chosen.paragraph,chosen.start??null,chosen.quote]);
+  const clearPreview=()=>{preview.hidden=true;preview.replaceChildren();signature='';
+    if(sheet===state.sheet&&state.sheetWait)$('.sheet-wait-preview',state.sheetWait.card)?.remove();};
+  const failure=message=>{diagnostic.step('failure');if(sheet!==state.sheet)return;
+    clearPreview();if(!hasResult)result.replaceChildren(el('p',{class:'quote'},chosen.quote));
+    setBusy(false);status.className='analysis-status error';
+    status.textContent=message+(hasResult?'；已有讲解已保留。':'');finishSheetWait(sheet);};
+  async function request(deep=false,force=true) {
+    if(sheet!==state.sheet||state.reader!==reader||busy)return;
+    setBusy(true);clearPreview();status.className='muted analysis-status';
+    status.textContent=deep?'正在请求深度复核…':'正在请求句子讲解…';
+    waitForSheet(sheet,reader,chosen.paragraph,status.textContent);
+    try {
     diagnostic.step('submit');
-    const jobId=await runJob(baseFor(reader)+'/analyze',{sentence:chosen.quote,paragraph:chosen.paragraph},async job=>{
+    const jobId=await runJob(baseFor(reader)+'/analyze',{sentence:chosen.quote,paragraph:chosen.paragraph,start:chosen.start,force,deep},async job=>{
       if(sheet===state.sheet){
-        if(job.state!=='done'){failure(job.error||'未能完成讲解');return;}
-        diagnostic.step('render');renderAnalysis(output,job.result,chosen.quote,{bookId:reader.bookId,index:reader.index,paragraph:chosen.paragraph});
+        if(job.state!=='done'||!job.result||job.result.partial){failure(job.error||'未能完成讲解');return;}
+        diagnostic.step('render');renderAnalysis(result,job.result,chosen.quote,source);hasResult=true;
+        clearPreview();setBusy(false);status.textContent=deep?'深度复核完成':'讲解已完成';
         finishSheetWait(sheet);diagnostic.step('rendered');
       }
       // Server already saved the explanation. A delayed local cache must not
       // prevent showing it or keep this job's completion callbacks pending.
-      if(job.state==='done'&&state.csrf&&cacheOwner===state.cacheIdentity){
+      if(job.state==='done'&&job.result&&!job.result.partial&&state.csrf&&cacheOwner===state.cacheIdentity){
         diagnostic.step('cache-write');
         Promise.resolve().then(()=>ReadingCache.put(cacheKey,job.result,{group:baseFor(reader)}))
           .then(()=>diagnostic.step('cache-saved')).catch(error=>diagnostic.error(error));
       }
-    },job=>{diagnostic.poll(job);if(sheet===state.sheet&&job.state!=='done'){$('p.muted',output).textContent=job.status;updateSheetWait(sheet,job.status);}},
+    },job=>{
+      diagnostic.poll(job);if(sheet!==state.sheet||job.state!=='running'&&job.state!=='queued')return;
+      status.textContent=job.status;updateSheetWait(sheet,job.status);
+      if(!job.partial)return;
+      const next=JSON.stringify(job.partial);if(next===signature)return;signature=next;
+      const hasPreview=Boolean(job.partial.context||job.partial.translation||job.partial.grammarComponents?.length);
+      if(!hasPreview){preview.hidden=true;preview.replaceChildren();if(!hasResult)result.replaceChildren(el('p',{class:'quote'},chosen.quote));}
+      else if(hasResult){preview.hidden=false;renderAnalysis(preview,job.partial,null,source);preview.prepend(el('h3',{},'新讲解 · 生成中，尚未替换原结果'));}
+      else renderAnalysis(result,job.partial,chosen.quote,source);
+      const card=state.sheetWait?.card;if(!card)return;
+      let snippet=$('.sheet-wait-preview',card);
+      const text=job.partial.translation||job.partial.context||'';
+      if(text){if(!snippet){snippet=el('p',{class:'sheet-wait-preview'});$('.sheet-wait-footer',card).before(snippet);}snippet.textContent=text;}
+      else snippet?.remove();
+      positionSheetWait();
+    },
       ()=>failure('连接中断，服务器仍会保存结果。可稍后重新打开句子讲解。'));
     diagnostic.step('accepted',{job:jobId});
-  }catch(error){diagnostic.error(error);failure(error.message);}
+    }catch(error){diagnostic.error(error);failure(error.message);}
+  }
+  diagnostic.step('cache-read');
+  const cached=await ReadingCache.get(cacheKey);
+  diagnostic.step('cache-ready');
+  if(sheet!==state.sheet)return;
+  setBusy(false);
+  if(cached&&!cached.value.partial){diagnostic.step('render');renderAnalysis(result,cached.value,chosen.quote,source);hasResult=true;
+    status.textContent='已保存的讲解 · 可重新讲解或深度复核';finishSheetWait(sheet);diagnostic.step('rendered');return;}
+  await request(false,false);
 }
 function renderAnalysis(output,data,sentence,source=null) {
-  output.replaceChildren(el('div',{class:'analysis-sentence'},sentence));
+  output.replaceChildren(...(sentence?[el('div',{class:'analysis-sentence'},sentence)]:[]));
+  for(const [key,title]of [['context','语境与含义'],['translation','参考译文']])if(data[key])output.append(el('section',{class:'analysis-block'},el('h3',{},title),el('p',{},data[key])));
   if(data.grammarComponents?.length){const section=el('section',{class:'analysis-block'},el('h3',{},'句子结构与语法'));
     const components=(nodes,depth=0)=>{for(const c of nodes){const row=el('div',{class:'analysis-component'},el('span',{},c.text),el('small',{},c.label));if(depth)row.classList.add('secondary');section.append(row);if(c.children)components(c.children,depth+1);}};
     components(data.grammarComponents);output.append(section);
   }else if(data.grammarDiagram)output.append(el('details',{},el('summary',{},'查看原语法图解'),el('pre',{},data.grammarDiagram)));
   for(const point of data.grammarPoints||[])output.append(el('section',{class:'analysis-block'},el('h3',{},point.title),el('p',{},point.text)));
-  for(const [key,title]of [['context','语境与含义'],['translation','参考译文']])if(data[key])output.append(el('section',{class:'analysis-block'},el('h3',{},title),el('p',{},data[key])));
   if(data.vocab?.length){output.append(el('div',{class:'vocab-section'},'句中词汇'));for(const entry of data.vocab)output.append(entryNode(entry,null,source));}
 }
 

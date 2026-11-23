@@ -374,7 +374,8 @@ def _is_budget_reject(text: str) -> bool:
     return any(k in t for k in keys)
 
 
-def chat(cfg, system, user, max_tokens=4000, temperature=0.3, on_delta=None, require_complete=False) -> str:
+def chat(cfg, system, user, max_tokens=4000, temperature=0.3, on_delta=None, require_complete=False,
+         on_text=None, control=None) -> str:
     """发一次对话。流式优先。自适应：
     - 推理模型烧额度/被 length 截断 → 额度加倍重试（上限 32768）
     - 网关拒绝 max_tokens（超限）→ 额度减半重试（下限 256）"""
@@ -384,10 +385,15 @@ def chat(cfg, system, user, max_tokens=4000, temperature=0.3, on_delta=None, req
     budget = max_tokens
     last_err = ""
     for attempt in range(4):
-        state = _StreamState(on_delta)
+        state = _StreamState(on_delta, on_text=on_text, control=control)
+        state.check()
+        if on_text:
+            on_text('')
         stream_err = None
         try:
             _stream_once(cfg, system, user, budget, temperature, state)
+        except RequestCancelled:
+            raise
         except LlmError as e:
             if _is_budget_reject(str(e)) and attempt < 3:
                 budget = max(256, budget // 2)
@@ -396,12 +402,14 @@ def chat(cfg, system, user, max_tokens=4000, temperature=0.3, on_delta=None, req
         except Exception as e:  # 流式不被支持/网络错误 → 退回非流式
             stream_err = e
 
+        state.check()
         if stream_err and state.saw_response:
             raise LlmError(f"流式响应接收中断：{stream_err}")
 
         content = state.text.strip()
         if not content and not state.saw_response:
             # 流式失败、或网关无视 stream:true 直接回普通 JSON（200 但无 data: 行）→ 退回非流式
+            state.check()
             try:
                 resp = requests.post(
                     endpoint(cfg),
@@ -424,6 +432,9 @@ def chat(cfg, system, user, max_tokens=4000, temperature=0.3, on_delta=None, req
 
         if on_delta:
             on_delta(len(content))
+        state.check()
+        if on_text and content:
+            on_text(_public_text(content))
 
         if content and not state.length_cut:
             return _strip_think(content)

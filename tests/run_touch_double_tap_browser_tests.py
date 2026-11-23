@@ -98,7 +98,8 @@ def main():
                     expect(page.locator('#sheet-wait')).to_be_visible()
                     page.wait_for_function('() => state.activeJobs.size>0')
                     assert len(calls) == count + 1, calls
-                    assert calls[-1] == dict(sentence=sentence, paragraph=paragraph), calls[-1]
+                    assert calls[-1] == dict(sentence=sentence, paragraph=paragraph,
+                        start=PARAGRAPHS[paragraph].index(sentence), force=False, deep=False), calls[-1]
                     # Native dblclick and a third tap cannot duplicate the job.
                     page.locator(f'#para-{paragraph} p').dispatch_event('dblclick')
                     page.touchscreen.tap(**point)
