@@ -695,7 +695,7 @@ async function digestPage(bookId,token) {
   const data=await api('/books/'+encodeURIComponent(bookId));if(token!==state.route)return;
   for(const article of data.articles){
     const history=localReading.get(`/books/${encodeURIComponent(article.bookId||bookId)}/articles/${article.articleIndex??article.index}`);
-    if(history&&history.lastReadAt>=(article.history?.lastReadAt||0)){article.history=history;if(history.atEnd)article.state='read';}
+    if(history&&history.lastReadAt>=(article.history?.lastReadAt||0)){article.history=history;}
   }
   const isSeries=data.sourceType==='podcast-series';
   const articleLink=a=>linkFor(a.bookId||bookId,a.articleIndex??a.index);
@@ -817,7 +817,7 @@ function saveProgress(keepalive=false,reader=state.reader) {
   const path=baseFor(reader),observedAt=ReadingSync.now();
   const progress=((reader.paragraphOffsets[position.paragraphIndex]||0)+position.paragraphOffset)/Math.max(1,reader.totalCharacters);
   const record={...position,title:reader.article.title,titleZh:reader.titleZh,bookTitle:reader.bookTitle,lastReadAt:observedAt,
-    paragraphCount:reader.article.paragraphs.length,wordCount:reader.wordCount,contentVersion:reader.contentVersion,progress,atStart:progress===0,atEnd:progress>=.995};
+    paragraphCount:reader.article.paragraphs.length,wordCount:reader.wordCount,contentVersion:reader.contentVersion,progress,atStart:progress===0,atEnd:progress>=.995,completionMode:'explicit'};
   reader.history=record;localReading.set(path,record);
   updateCachedHistory(path,record);
   ReadingSync.add(path+'/progress',{...position,observedAt,basedOnReadAt:reader.progressServerAt||0,contentVersion:reader.contentVersion});
@@ -981,14 +981,39 @@ function flushReadingClock(reader=state.reader,keepalive=false,initialPosition=n
   if(!reader?.clock)return Promise.resolve();
   const clock=reader.clock;
   const position=initialPosition||currentPosition(reader);if(!position)return Promise.resolve();
-  const elapsedMs=Math.floor(clock.elapsedMs),signature=JSON.stringify([elapsedMs,position]);
+  // pagehide/route changes may flush before the browser delivers its scroll
+  // event. Apply the same guard here so that ordering cannot credit a jump.
+  if(!initialPosition&&!clock.navigation&&isReadingNavigation(clock)){
+    flushReadingClock(reader,keepalive,clock.scrollAnchor.position);clock.navigation=true;
+  }
+  const navigation=!!clock.navigation;
+  const elapsedMs=Math.floor(clock.elapsedMs),signature=JSON.stringify([elapsedMs,position,navigation]);
   if(signature===clock.lastQueued)return clock.sending||Promise.resolve();
   clock.lastQueued=signature;
-  const data={...position,sessionId:clock.id,sequence:clock.sequence++,elapsedMs,sampledAt:ReadingSync.now(),contentVersion:reader.contentVersion};
+  const data={...position,sessionId:clock.id,sequence:clock.sequence++,elapsedMs,sampledAt:ReadingSync.now(),contentVersion:reader.contentVersion,navigation};
   ReadingSync.add(baseFor(reader)+'/reading-time',data);
   const pending=ReadingSync.drain().catch(()=>{clock.syncFailed=true;}).finally(()=>{if(clock.sending===pending)clock.sending=null;});
   clock.sending=pending;
   return clock.sending;
+}
+function isReadingNavigation(clock){
+  return clock.scrollAnchor&&(clock.scrollbarHeld||Math.abs(scrollY-clock.scrollAnchor.y)>Math.max(600,innerHeight*1.25));
+}
+function trackReadingScroll(reader) {
+  const clock=reader.clock;if(!clock||clock.stopped||reader.restoringProgress)return;
+  const anchor=clock.scrollAnchor;
+  // A large movement in one scrolling gesture is navigation. Flush the old
+  // reading position first so time spent there cannot pay for the skipped text.
+  if(anchor&&!clock.navigation&&isReadingNavigation(clock)){
+    readingClockTick(reader);flushReadingClock(reader,false,anchor.position);
+    clock.navigation=true;flushReadingClock(reader);
+  }
+  clearTimeout(clock.scrollSettled);
+  clock.scrollSettled=setTimeout(()=>{
+    if(clock.stopped||state.reader!==reader)return;
+    if(clock.navigation){readingClockTick(reader);flushReadingClock(reader);clock.navigation=false;}
+    clock.scrollAnchor={y:scrollY,position:currentPosition(reader)};
+  },250);
 }
 function startReadingClock(reader,initialPosition) {
   const now=performance.now();
@@ -996,7 +1021,13 @@ function startReadingClock(reader,initialPosition) {
     sequence:0,elapsedMs:0,syncedElapsed:0,serverMs:reader.readingTiming?.activeMs||0,
     lastSample:now,lastInteraction:now,manualPaused:false,completedPaused:reader.state==='read',stopped:false};
   const clock=reader.clock;
-  clock.interaction=event=>{if(event.isTrusted){readingClockTick(reader);clock.lastInteraction=performance.now();}};
+  clock.scrollAnchor={y:scrollY,position:initialPosition||currentPosition(reader)};
+  clock.interaction=event=>{if(event.isTrusted){
+    readingClockTick(reader);clock.lastInteraction=performance.now();
+    if(event.type==='pointerdown'&&event.clientX>=document.documentElement.clientWidth)clock.scrollbarHeld=true;
+  }};
+  clock.pointerEnd=()=>{clock.scrollbarHeld=false;};
+  for(const name of ['pointerup','pointercancel'])window.addEventListener(name,clock.pointerEnd,{passive:true});
   for(const name of ['pointerdown','pointermove','keydown','wheel','touchstart'])window.addEventListener(name,clock.interaction,{passive:true});
   clock.focus=()=>{readingClockTick(reader);clock.lastInteraction=performance.now();};
   window.addEventListener('focus',clock.focus);
@@ -1010,8 +1041,9 @@ function startReadingClock(reader,initialPosition) {
 function stopReadingClock(reader,save=true) {
   if(!reader?.clock)return Promise.resolve();
   readingClockTick(reader);
-  const clock=reader.clock;clock.stopped=true;clearInterval(clock.interval);
+  const clock=reader.clock;clock.stopped=true;clearInterval(clock.interval);clearTimeout(clock.scrollSettled);
   for(const name of ['pointerdown','pointermove','keydown','wheel','touchstart'])window.removeEventListener(name,clock.interaction);
+  for(const name of ['pointerup','pointercancel'])window.removeEventListener(name,clock.pointerEnd);
   window.removeEventListener('focus',clock.focus);
   window.removeEventListener('blur',clock.blur);
   return save?flushReadingClock(reader,true):Promise.resolve();
@@ -1555,6 +1587,7 @@ async function readerPage(bookId,index,token,startParagraph=null) {
   updateReaderProgress(reader);
   readerScroll=()=>{
     if(state.reader!==reader)return;
+    trackReadingScroll(reader);
     if(!progressFrame)progressFrame=requestAnimationFrame(()=>{progressFrame=null;updateReaderProgress(reader);positionSelectionBar(reader);refreshVocabHighlightWindow(reader);});
     if(reader.restoringProgress)return;
     progressStatus(reader,'阅读中');clearTimeout(progressTimer);progressTimer=setTimeout(()=>saveProgress(),850);

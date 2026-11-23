@@ -2,6 +2,7 @@
 from collections import defaultdict
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+import json
 import re
 import sqlite3
 import time
@@ -28,7 +29,9 @@ def connection():
                 id TEXT PRIMARY KEY, source_id TEXT NOT NULL, title_key TEXT NOT NULL,
                 sequence INTEGER NOT NULL, elapsed_ms INTEGER NOT NULL,
                 last_seen INTEGER NOT NULL, furthest_word INTEGER NOT NULL,
-                pending_ms INTEGER NOT NULL DEFAULT 0);
+                pending_ms INTEGER NOT NULL DEFAULT 0,
+                last_word INTEGER NOT NULL DEFAULT 0,
+                read_ranges TEXT NOT NULL DEFAULT '[]');
             CREATE TABLE IF NOT EXISTS intervals (
                 id INTEGER PRIMARY KEY, source_id TEXT NOT NULL, title_key TEXT NOT NULL,
                 started_at INTEGER NOT NULL, ended_at INTEGER NOT NULL,
@@ -38,8 +41,21 @@ def connection():
             CREATE INDEX IF NOT EXISTS intervals_source ON intervals(source_id);
             CREATE TABLE IF NOT EXISTS clock (id INTEGER PRIMARY KEY, credited_until INTEGER NOT NULL);
         ''')
-        if 'pending_ms' not in {r['name'] for r in db.execute('PRAGMA table_info(sessions)')}:
-            db.execute('ALTER TABLE sessions ADD COLUMN pending_ms INTEGER NOT NULL DEFAULT 0')
+        columns = {r['name'] for r in db.execute('PRAGMA table_info(sessions)')}
+        if not {'pending_ms', 'last_word', 'read_ranges'} <= columns:
+            # Concurrent first requests may both see the old schema. Recheck
+            # while holding the write lock before applying the migration.
+            db.execute('BEGIN IMMEDIATE')
+            columns = {r['name'] for r in db.execute('PRAGMA table_info(sessions)')}
+            if 'pending_ms' not in columns:
+                db.execute('ALTER TABLE sessions ADD COLUMN pending_ms INTEGER NOT NULL DEFAULT 0')
+            if 'last_word' not in columns:
+                db.execute('ALTER TABLE sessions ADD COLUMN last_word INTEGER NOT NULL DEFAULT 0')
+                db.execute('UPDATE sessions SET last_word=furthest_word')
+            if 'read_ranges' not in columns:
+                db.execute("ALTER TABLE sessions ADD COLUMN read_ranges TEXT NOT NULL DEFAULT '[]'")
+                db.execute("UPDATE sessions SET read_ranges='[[0,' || furthest_word || ']]'")
+            db.commit()
         yield db
         db.commit()
     except Exception:
@@ -75,6 +91,18 @@ def _record_result(db,source_id,active=0,words=0):
     return dict(acceptedMs=active,acceptedWords=words,totalActiveMs=total)
 
 
+def credit_range(ranges, start, end):
+    """Credit only unseen text in this pass; navigation never fills skipped gaps."""
+    words = end - start - sum(max(0, min(end, b) - max(start, a)) for a, b in ranges)
+    merged = []
+    for a, b in sorted([*ranges, [start, end]]):
+        if merged and a <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    return words, merged
+
+
 def record(meta, art, data):
     """Cumulative counters make retries idempotent; server time bounds the credit.
 
@@ -88,6 +116,9 @@ def record(meta, art, data):
         raise ValueError('阅读计时序号无效')
     if type(elapsed) is not int or not 0 <= elapsed <= 7 * 86_400_000:
         raise ValueError('阅读计时数据无效')
+    navigation = data.get('navigation', False)
+    if type(navigation) is not bool:
+        raise ValueError('阅读跳转标记无效')
     position = word_position(art, data)
     source_id = reading_stats.web_id(meta['id'], art['index'])
     key = reading_stats.title_key(art['title'])
@@ -104,8 +135,9 @@ def record(meta, art, data):
             raise ValueError('计时会话与文章不匹配')
         if previous is None:
             # Register the restored position as a baseline, not newly read words.
-            db.execute('INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?)',
-                (session_id, source_id, key, sequence, elapsed, now, position,0))
+            db.execute('INSERT INTO sessions(id,source_id,title_key,sequence,elapsed_ms,last_seen,'
+                'furthest_word,pending_ms,last_word,read_ranges) VALUES (?,?,?,?,?,?,?,?,?,?)',
+                (session_id, source_id, key, sequence, elapsed, now, position, 0, position, '[]'))
             # Old session counters are unnecessary after a week of inactivity.
             db.execute('DELETE FROM sessions WHERE last_seen<?', (now - 7 * 86_400_000,))
             return _record_result(db,source_id)
@@ -118,20 +150,24 @@ def record(meta, art, data):
         credit = db.execute('SELECT credited_until FROM clock WHERE id=1').fetchone()
         active = max(0, min(elapsed - previous['elapsed_ms'], now - previous['last_seen'],
             MAX_INTERVAL_MS, now - credit['credited_until'] if credit else MAX_INTERVAL_MS))
-        words = max(0, position - previous['furthest_word']) if active else 0
+        advance = max(0, position - previous['last_word'])
         pending = previous['pending_ms'] + active
         # Page search, dragging the scrollbar, or skipping to the end must not
         # turn thousands of skipped words into measured reading volume/speed.
-        if words > max(40, pending / 60):
-            words = 0
-        if position > previous['furthest_word']:
+        ranges = json.loads(previous['read_ranges'])
+        words = 0
+        if active and not navigation and 0 < advance <= max(40, pending / 60):
+            words, ranges = credit_range(ranges, previous['last_word'], position)
+        if navigation or position != previous['last_word']:
             pending = 0
         if active:
             db.execute('INSERT INTO intervals(source_id,title_key,started_at,ended_at,active_ms,words) VALUES (?,?,?,?,?,?)',
                 (source_id, key, now-active, now, active, words))
             db.execute('INSERT OR REPLACE INTO clock VALUES (1,?)', (now,))
-        db.execute('UPDATE sessions SET sequence=?,elapsed_ms=?,last_seen=?,furthest_word=?,pending_ms=? WHERE id=?',
-            (sequence, elapsed, now, max(position, previous['furthest_word']), pending, session_id))
+        db.execute('UPDATE sessions SET sequence=?,elapsed_ms=?,last_seen=?,furthest_word=?,pending_ms=?,'
+            'last_word=?,read_ranges=? WHERE id=?',
+            (sequence, elapsed, now, max(position, previous['furthest_word']), pending, position,
+             json.dumps(ranges), session_id))
         result = _record_result(db,source_id,active,words)
     return result
 

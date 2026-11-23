@@ -534,7 +534,8 @@ def _reading_record(data):
     return {**{k: data[k] for k in numeric}, "title": data["title"],
             "titleZh": data.get("titleZh", ""), "paragraphStart": data.get("paragraphStart", ""),
             "progress": progress, "atStart": data.get("atStart") is True,
-            "atEnd": data.get("atEnd") is True}
+            "atEnd": data.get("atEnd") is True,
+            **({"completionMode": "explicit"} if data.get("completionMode") == "explicit" else {})}
 
 
 def load_reading_history(book_id: str) -> dict:

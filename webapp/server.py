@@ -692,10 +692,10 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare
             record = store.save_reading_progress(book_id, index, dict(title=art['title'], titleZh='',
                 paragraphIndex=para, paragraphOffset=offset, paragraphCount=len(art['paragraphs']),
                 paragraphStart=art['paragraphs'][para][:100], wordCount=len(gen._TOKEN.findall(' '.join(art['paragraphs']))),
-                progress=progress, atStart=para == 0 and offset == 0, atEnd=progress >= .995), read_at=observed)
-            if record['atEnd'] and not previous.get('atEnd'):
-                reading_stats.mark_web(meta, art, True)
-                store.set_article_state(book_id, index, 'read')
+                progress=progress, atStart=para == 0 and offset == 0, atEnd=progress >= .995,
+                completionMode='explicit'), read_at=observed)
+            # A saved viewport is navigation, not evidence of completion. Only
+            # the explicit state endpoint may credit the whole article.
         return jsonify(record=record)
 
     @app.get('/api/books/<book_id>/articles/<int:index>/vocab')

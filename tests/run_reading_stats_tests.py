@@ -50,11 +50,20 @@ class ReadingTests(unittest.TestCase):
         return dict(title='A Candid View!', url='https://example.invalid/article#paragraph', wordCount=100,
                     readAt=int(time.time()*1000), **changes)
 
-    def test_completion_persists_after_backscroll_and_explicit_unread_removes(self):
+    def test_scroll_to_end_never_completes_but_explicit_completion_persists(self):
         self.assertEqual(self.stats()['articleCount'], 0)
         self.post('/books/sample/articles/0/progress', dict(paragraphIndex=0, paragraphOffset=4))
         self.assertEqual(self.stats()['articleCount'], 0)
         self.post('/books/sample/articles/0/progress', dict(paragraphIndex=1, paragraphOffset=999))
+        self.assertEqual(self.stats()['articleCount'], 0)
+        self.assertEqual(store.load_article_states('sample'), {})
+        history = store.load_reading_history('sample')['0']
+        self.assertTrue(history['atEnd'])
+        self.assertEqual(history['completionMode'], 'explicit')
+        # Even a statistics rebuild must not treat a saved end viewport as read.
+        (config.app_dir() / 'reading-stats.json').unlink(missing_ok=True)
+        self.assertEqual(self.stats()['articleCount'], 0)
+        self.post('/books/sample/state', dict(articleIndex=0, state='read'))
         completed = self.stats()
         self.assertEqual(completed['articleCount'], 1)
         self.assertEqual(completed['totalWords'], 7)
@@ -90,6 +99,14 @@ class ReadingTests(unittest.TestCase):
         self.post('/books/sample/state', dict(articleIndex=0, state='unread'))
         self.assertEqual(self.stats()['articleCount'], 0)
         self.post('/books/sample/articles/0/progress', dict(paragraphIndex=1, paragraphOffset=999))
+        self.assertEqual(self.stats()['articleCount'], 0)
+        # Real legacy evidence is still migrated, before explicit marking was
+        # required. Existing completion records are never silently deleted.
+        old = store.load_reading_history('sample')['0']
+        old.pop('completionMode')
+        store._atomic_json_write(config.app_dir() / 'reading-stats.json', dict(sources={}, excluded=[]))
+        store._atomic_json_write(config.app_dir() / 'article_states/sample.json', {})
+        store.save_reading_progress('sample', 0, old)
         self.assertEqual(self.stats()['articleCount'], 1)
         self.post('/books/sample/state', dict(articleIndex=0, state='uninterested'))
         self.assertEqual(self.stats()['articleCount'], 0)

@@ -47,11 +47,11 @@ class ActivityTests(unittest.TestCase):
                 path.parent.mkdir(parents=True,exist_ok=True)
                 path.write_bytes(content)
 
-    def pulse(self,sequence=0,elapsed=0,words=0,session=None,index=0):
+    def pulse(self,sequence=0,elapsed=0,words=0,session=None,index=0,**extra):
         para,offset=divmod(words,100)
         if para>=20:para,offset=19,100
         return self.post(f'/books/sample/articles/{index}/reading-time',dict(sessionId=session or self.session,
-            sequence=sequence,elapsedMs=elapsed,paragraphIndex=para,paragraphOffset=offset*5))
+            sequence=sequence,elapsedMs=elapsed,paragraphIndex=para,paragraphOffset=offset*5,**extra))
 
     def report(self,**params):
         return self.client.get('/api/reading-stats',query_string=params)
@@ -223,6 +223,58 @@ class ActivityTests(unittest.TestCase):
         self.assertEqual(result.json['acceptedWords'],450)
         self.assertEqual(activity.article_timing('sample',0)['wordsPerMinute'],600)
 
+    def test_navigation_after_long_wait_never_spends_time_on_skipped_text(self):
+        self.pulse()
+        self.now+=30_000;self.pulse(1,30_000,100)
+        self.now+=120_000;self.pulse(2,150_000,100)
+        self.now+=120_000;self.pulse(3,270_000,100)
+        self.now+=1000
+        result=self.pulse(4,271_000,2000,navigation=True)
+        self.assertEqual(result.json['acceptedWords'],0)
+        self.post('/books/sample/articles/0/progress',dict(paragraphIndex=19,paragraphOffset=500))
+        stats=self.report().json
+        self.assertEqual(stats['articleCount'],0)
+        self.assertEqual(stats['analytics']['readingVolume']['totalWords'],100)
+        self.assertEqual(sum(d['measuredWords'] for d in stats['analytics']['daily']),100)
+        self.now+=1000;self.pulse(5,272_000,100,navigation=True)
+        self.now+=30_000;self.pulse(6,302_000,200)
+        self.assertEqual(self.report().json['analytics']['readingVolume']['totalWords'],200)
+        # Explicit completion replaces partial words, even after returning to top.
+        self.post('/books/sample/state',dict(articleIndex=0,state='read'))
+        self.post('/books/sample/articles/0/progress',dict(paragraphIndex=0,paragraphOffset=0))
+        self.assertEqual(self.report().json['analytics']['readingVolume']['totalWords'],2000)
+
+    def test_rejected_jump_keeps_gaps_and_returning_reading_available(self):
+        self.pulse()
+        for seq,elapsed,position in [(1,30_000,100),(2,31_000,1500),
+                                     (3,61_000,1600),(4,62_000,50),(5,92_000,200),
+                                     (6,93_000,1500),(7,123_000,1650)]:
+            self.now+=elapsed-(0 if seq==1 else previous)
+            self.pulse(seq,elapsed,position)
+            previous=elapsed
+        # [0,200] and [1500,1650] only; no skipped middle or reread overlap.
+        self.assertEqual(activity.article_timing('sample',0)['measuredWords'],350)
+
+    def test_restoring_end_then_returning_to_start_does_not_mark_unread_text_as_covered(self):
+        self.pulse(words=2000)
+        self.now+=1000;self.pulse(1,1000,0,navigation=True)
+        self.now+=30_000;self.pulse(2,31_000,100)
+        self.assertEqual(activity.article_timing('sample',0)['measuredWords'],100)
+
+    def test_existing_session_schema_upgrades_without_recrediting_old_words(self):
+        import sqlite3
+        from contextlib import closing
+        with closing(sqlite3.connect(activity.database())) as db:
+            db.execute('CREATE TABLE sessions (id TEXT PRIMARY KEY,source_id TEXT,title_key TEXT,'
+                'sequence INTEGER,elapsed_ms INTEGER,last_seen INTEGER,furthest_word INTEGER)')
+            db.execute('INSERT INTO sessions VALUES (?,?,?,?,?,?,?)',
+                (self.session,'web:sample:0',reading_stats.title_key(self.art['title']),1,30_000,self.now,100))
+            db.commit()
+        self.now+=30_000
+        self.assertEqual(self.pulse(2,60_000,50).json['acceptedWords'],0)
+        self.now+=30_000
+        self.assertEqual(self.pulse(3,90_000,150).json['acceptedWords'],50)
+
     def test_midnight_is_split_and_timezone_offset_changes_daily_buckets(self):
         yesterday=datetime.now(timezone.utc).date()-timedelta(days=1)
         self.now=int(datetime.combine(yesterday,datetime.min.time(),timezone.utc).timestamp()*1000)+86_390_000
@@ -280,7 +332,8 @@ class ActivityTests(unittest.TestCase):
         self.assertEqual(self.client.post(path,json={}).status_code,403)
         base=dict(sessionId=self.session,sequence=0,elapsedMs=0,paragraphIndex=0,paragraphOffset=0)
         for change in [dict(sessionId='../bad'),dict(sequence=True),dict(sequence=-1),dict(elapsedMs=True),
-                dict(elapsedMs=-1),dict(elapsedMs=10**20),dict(paragraphIndex=1000),dict(paragraphOffset=-1)]:
+                dict(elapsedMs=-1),dict(elapsedMs=10**20),dict(paragraphIndex=1000),dict(paragraphOffset=-1),
+                dict(navigation='true')]:
             response=self.post(path[4:],{**base,**change})
             self.assertEqual(response.status_code,400,response.json)
         self.assertFalse(activity.database().exists())

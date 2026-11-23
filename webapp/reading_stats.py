@@ -70,7 +70,8 @@ def summary(days=365, timezone_offset=0):
         states = store.load_article_states(meta['id'])
         history = store.load_reading_history(meta['id'])
         eligible = {int(i) for i, value in states.items() if value == 'read'}
-        eligible.update(int(i) for i, h in history.items() if h.get('atEnd') and i not in states)
+        eligible.update(int(i) for i, h in history.items() if h.get('atEnd') and
+                        h.get('completionMode') != 'explicit' and i not in states)
         eligible = {i for i in eligible if web_id(meta['id'], i) not in data['sources']
                     and web_id(meta['id'], i) not in data['excluded']}
         if not eligible:
