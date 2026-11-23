@@ -1,6 +1,7 @@
 """Phrase coverage regressions: temporary library, offline dictionary and mocked LLM only."""
 import copy
 import json
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -99,6 +100,60 @@ class PhraseTests(unittest.TestCase):
         self.assertEqual(result['processedParagraphs'], [-1,0,1,2])
         # Combined generation does not disable the explicit, independent phrase pass.
         self.assertEqual(gen.phrase_pending(result, ARTICLE, 0), 1)
+
+    def test_retry_starts_with_selected_model_despite_historical_failure(self):
+        store.save_vocab('sample', dict(articleIndex=0, level='cet4',
+            chunkFailures={'-1,0,1,2': ['test']}, processedParagraphs=[]))
+        backup = dict(self.cfg, name='backup', model='backup-model')
+        with patch.object(llm, 'chat', return_value=self.response()) as chat:
+            result = gen.generate_vocab(WebTests.meta, ARTICLE, 'cet4', self.cfg, llm_rotation=[backup, self.cfg])
+        self.assertEqual([c.args[0]['name'] for c in chat.call_args_list], ['test'])
+        self.assertEqual(result['generationStats']['modelsUsed'], [dict(name='test', model='deepseek-test')])
+
+    def test_fallback_progress_and_saved_models_report_actual_config_without_secrets(self):
+        original = config.load_settings()
+        primary = original['llms'][0]
+        backup = dict(primary, name='backup-route', model='backup-model', apiKey='BACKUP_PRIVATE_KEY')
+        config.save_settings(dict(original, llms=[primary, backup]))
+        self.addCleanup(config.save_settings, original)
+        entered, release = threading.Event(), threading.Event()
+        def answer(cfg, system, user, **kwargs):
+            if cfg['name'] == primary['name']:
+                raise RuntimeError('Simulated primary failure')
+            kwargs['on_delta'](120)
+            entered.set()
+            if not release.wait(5):
+                raise AssertionError('Test did not release backup response')
+            return self.response({0: [['paper over','phr.','掩盖不确定性','',False,'']]}, (0,))
+        with patch.object(llm, 'chat', side_effect=answer) as chat:
+            response = self.post('/books/sample/articles/0/generate-vocab', dict(phrasesOnly=True, paragraph=0))
+            try:
+                self.assertTrue(entered.wait(3))
+                progress = self.client.get('/api/jobs/'+response.json['jobId']).json
+                self.assertEqual(progress['model'], dict(name=primary['name'], model=primary['model']))
+                self.assertEqual(progress['activeModels'], [dict(name=backup['name'], model=backup['model'])])
+                for text in ['backup-route', 'backup-model', '备用切换', primary['name'], '120']:
+                    self.assertIn(text, progress['status'])
+                for secret in ['SOURCE_SECRET', 'BACKUP_PRIVATE_KEY', 'apiKey', 'baseUrl', 'modelRequests']:
+                    self.assertNotIn(secret, json.dumps(progress))
+            finally:
+                release.set()
+            done = self.wait_job(response)
+        self.assertEqual(done['state'], 'done', done)
+        self.assertEqual(done['activeModels'], [])
+        self.assertEqual([c.args[0]['name'] for c in chat.call_args_list], [primary['name'], backup['name']])
+        expected = [dict(name=c['name'], model=c['model']) for c in [primary, backup]]
+        self.assertEqual(done['usedModels'], expected)
+        saved = store.load_vocab('sample', 0, 'cet4')
+        self.assertEqual(saved['generationStats']['modelsUsed'], expected)
+        shown = self.client.get('/api/books/sample/articles/0/vocab').json
+        self.assertEqual(shown['vocab']['generationStats']['modelsUsed'], expected)
+        events = self.app.extensions['diagnostics'].path.read_text(encoding='utf-8')
+        for secret in ['SOURCE_SECRET', 'BACKUP_PRIVATE_KEY', 'apiKey', 'baseUrl']:
+            self.assertNotIn(secret, events)
+        requests = [json.loads(row) for row in events.splitlines() if json.loads(row).get('job') == response.json['jobId']
+                    and json.loads(row).get('event') == 'job.model']
+        self.assertEqual([r['model'] for r in requests], expected)
 
     def test_explicit_model_thinking_level_overrides_vocabulary_default(self):
         for level in ['disabled', 'low', 'medium', 'high']:

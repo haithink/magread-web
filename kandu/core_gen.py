@@ -653,7 +653,7 @@ def _vocab_sections(obj, chunk, lexicon, phrases_only=False):
 
 
 def generate_vocab(meta, article, level, cfg, on_progress=None, on_chars=None, llm_rotation=None, max_workers=2,
-                   enrich=False, phrases_only=False, only_para=None):
+                   enrich=False, phrases_only=False, only_para=None, on_model=None):
     """本地筛词/音标 + 紧凑语境释义；最多两个请求并行，主线程逐块落盘。"""
     started = time.perf_counter()
     existing = store.load_vocab(meta["id"], article["index"], level) or {}
@@ -720,9 +720,9 @@ def generate_vocab(meta, article, level, cfg, on_progress=None, on_chars=None, l
     pending = []
     for chunk in chunks:
         tried = set.intersection(*(tried_by_index.get(idx, set()) for idx, _ in chunk))
-        # 显式点击补缺就是重试授权。优先新渠道，过去失败的配置也不能永久封锁。
-        pending.append((chunk, [c for c in rotation if c.get("name") not in tried]
-                              + [c for c in rotation if c.get("name") in tried]))
+        # 每次显式生成/补缺都先用当前选定模型；历史失败只调整备用渠道的顺序。
+        pending.append((chunk, [rotation[0]] + [c for c in rotation[1:] if c.get("name") not in tried]
+                              + [c for c in rotation[1:] if c.get("name") in tried]))
 
     merged_sections = {p["index"]: p for p in existing.get("paragraphs", [])}
     merged_title = list(existing.get("titleEntries", []))
@@ -732,7 +732,7 @@ def generate_vocab(meta, article, level, cfg, on_progress=None, on_chars=None, l
     censor_hit = False
     lock = threading.Lock()
     received = {}
-    stats = {"chunks": len(chunks), "requests": 0, "inputChars": 0, "outputChars": 0,
+    stats = {"chunks": len(chunks), "requests": 0, "inputChars": 0, "outputChars": 0, "modelsUsed": [],
              "workers": min(max(1, max_workers), 2, len(chunks))}
     system = prompts.phrases_system() if phrases_only else prompts.vocab_system(level_label(level))
 
@@ -761,8 +761,13 @@ def generate_vocab(meta, article, level, cfg, on_progress=None, on_chars=None, l
             with lock:
                 stats["requests"] += 1
                 stats["inputChars"] += len(system) + len(user)
+                info = {"name": name, "model": config.get("model", "")}
+                if info not in stats["modelsUsed"]:
+                    stats["modelsUsed"].append(info)
                 if on_progress:
                     on_progress(completed, len(chunks), name)
+            if on_model:
+                on_model(key, config, True)
             try:
                 raw = llm.chat(request_cfg, system, user, max_tokens=budget, on_delta=chars_received, require_complete=True)
                 with lock:
@@ -784,6 +789,9 @@ def generate_vocab(meta, article, level, cfg, on_progress=None, on_chars=None, l
                 if config.get("apiKey"):
                     message = message.replace(config["apiKey"], "[redacted]")
                 details.append({"llm": name, "error": message[:500]})
+            finally:
+                if on_model:
+                    on_model(key, config, False)
         return key, collected, failures, censor, remaining, details
 
     def save():

@@ -415,7 +415,10 @@ function waitForSheet(sheet, reader, paragraph=null, status='正在准备请求�
   state.sheetWait.label.textContent=status;dockSheet(sheet);
 }
 function updateSheetWait(sheet,status) {
-  if(sheet===state.sheet&&state.sheetWait)state.sheetWait.label.textContent=status||'正在等待模型响应…';
+  if(sheet===state.sheet&&state.sheetWait){
+    state.sheetWait.label.textContent=status||'正在等待模型响应…';
+    state.sheetWait.reposition();
+  }
 }
 function finishSheetWait(sheet) {
   readerDiagnostics.event('sheet.finish');
@@ -1721,6 +1724,8 @@ async function vocabSheet(reader,paragraph) {
   if(missing)body.append(el('p',{class:'notice'},paragraph===null?`全文还有 ${data.missing.length} 段待生成，当前只展示已有词条和个人收藏。`:'本段生词尚未生成，当前只展示已有词条和个人收藏。'));
   const actions=el('div',{class:'row'},button('生成 / 补缺全文生词',action(()=>generateReaderVocab(reader,paragraph)),'primary'),
     button('补充短语解释',action(()=>generateReaderVocab(reader,paragraph,{phrasesOnly:true,paragraph}))));body.append(actions);
+  const models=data.vocab.generationStats?.modelsUsed;
+  if(models?.length)body.append(el('p',{class:'muted generation-models'},'最近一次生成使用的 LLM：'+models.map(m=>m.name&&m.model&&m.name!==m.model?`${m.name}（${m.model}）`:m.name||m.model).join(' / ')));
   const search=el('input',{type:'search',class:'search',placeholder:'查找词条…','aria-label':'查找词条'}),list=el('div');
   body.append(el('div',{class:'filters'},search),list);
   function render(){

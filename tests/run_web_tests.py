@@ -272,6 +272,8 @@ class WebTests(unittest.TestCase):
             self.assertEqual(first.json['jobId'],second.json['jobId'])
             progress=self.client.get('/api/jobs/'+first.json['jobId']).json
             self.assertIn('200',progress['status'])
+            self.assertIn('LLM：test（test-model）', progress['status'])
+            self.assertEqual(progress['model'], dict(name='test', model='test-model'))
             self.assertNotIn('control',progress)
             release.set()
             self.assertEqual(self.wait_job(first)['state'],'done')
@@ -287,6 +289,7 @@ class WebTests(unittest.TestCase):
             job=self.wait_job(self.post('/books/sample/generate-digest',{}))
         self.assertEqual(job['state'],'error')
         self.assertNotIn('SOURCE_SECRET',job['error'])
+        self.assertIn('LLM：test（test-model）', job['status'])
 
     def test_discussion_cumulative_stream_and_persistence(self):
         def converse(cfg, system, messages, on_text, control):
@@ -299,6 +302,7 @@ class WebTests(unittest.TestCase):
             result=self.wait_job(response)
         self.assertEqual(result['state'],'done',result)
         self.assertEqual(result['text'],'这个词表示坦率。')
+        self.assertEqual(result['model'], dict(name='test', model='test-model'))
         messages=self.client.get('/api/books/sample/articles/0/discussion').json['messages']
         self.assertEqual(messages[-1]['content'],'这个词表示坦率。')
         self.assertEqual(messages[-1]['status'],'complete')
@@ -332,6 +336,7 @@ class WebTests(unittest.TestCase):
         identity=core_sentence.identity(core_sentence.context(self.article,0,sentence),cfg)
         store.save_analysis('sample',sentence,0,cached,identity)
         result=self.wait_job(self.post('/books/sample/articles/0/analyze',dict(sentence=sentence,paragraph=0)))
+        self.assertEqual(result['model'], dict(name=cfg['name'], model=cfg['model']))
         self.assertEqual(result['state'],'done',result)
         self.assertEqual(result['result']['translation'],cached['translation'])
         self.assertEqual(self.post('/books/sample/articles/0/analyze',dict(sentence='invented sentence',paragraph=0)).status_code,400)

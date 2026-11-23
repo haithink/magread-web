@@ -50,6 +50,16 @@ def clean_error(error):
     return re.sub(r'sk-[A-Za-z0-9_-]+', '[已隐藏密钥]', text)
 
 
+def model_info(cfg):
+    """Only identifiers suitable for task progress; never copy model credentials."""
+    return dict(name=str(cfg.get('name', ''))[:80], model=str(cfg.get('model', ''))[:200])
+
+
+def model_label(info):
+    name, model = info.get('name'), info.get('model')
+    return f'{name}（{model}）' if name and model and name != model else name or model or '未命名模型'
+
+
 class Jobs:
     def __init__(self, diagnostics=None):
         self.pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix='kandu-web')
@@ -57,7 +67,7 @@ class Jobs:
         self.items = OrderedDict()
         self.diagnostics = diagnostics
 
-    def submit(self, key, action):
+    def submit(self, key, action, model=None):
         with self.lock:
             for job in self.items.values():
                 if job['key'] == key and job['state'] in ('queued', 'running'):
@@ -73,10 +83,25 @@ class Jobs:
             job_id = secrets.token_urlsafe(18)
             job = dict(id=job_id, key=key, state='queued', status='等待前面的任务', text='',
                        result=None, error='', createdAt=time.time(), control=llm.RequestControl())
+            if model is not None:
+                job.update(model=model_info(model), activeModels=[], usedModels=[], modelRequests={})
             self.items[job_id] = job
 
         def update(**values):
             with self.lock:
+                if request_model := values.pop('modelRequest', None):
+                    request_id, info, active = request_model
+                    if active:
+                        job['modelRequests'][request_id] = info
+                        if info not in job['usedModels']:
+                            job['usedModels'].append(info)
+                        if self.diagnostics:
+                            self.diagnostics.write(dict(event='job.model', job=job_id, kind=key[0],
+                                model=info, preferredModel=job['model']))
+                    else:
+                        job['modelRequests'].pop(request_id, None)
+                    job['activeModels'] = list({(m['name'], m['model']): m
+                                               for m in job['modelRequests'].values()}.values())
                 job.update(values)
 
         def run():
@@ -84,7 +109,8 @@ class Jobs:
             def record(event, **extra):
                 if self.diagnostics:
                     self.diagnostics.write(dict(event=event, job=job_id, kind=key[0],
-                        elapsedMs=round((time.monotonic()-started)*1000), **extra))
+                        elapsedMs=round((time.monotonic()-started)*1000),
+                        **({'model': job['model']} if model is not None else {}), **extra))
             try:
                 update(state='running', status='准备中')
                 record('job.started')
@@ -107,7 +133,14 @@ class Jobs:
             job = self.items.get(job_id)
             if not job:
                 abort(404, '任务已过期，请刷新页面查看已保存结果')
-            return {k: v for k, v in job.items() if k not in ('key', 'control')}
+            result = {k: v for k, v in job.items() if k not in ('key', 'control', 'modelRequests')}
+            if 'model' in job:
+                actual = job['activeModels'] or job['usedModels'] or [job['model']]
+                label = ' / '.join(model_label(m) for m in actual)
+                fallback = any(m != job['model'] for m in job['usedModels'])
+                note = f' · 备用切换（首选：{job["model"]["name"]}）' if fallback else ''
+                result['status'] = f'LLM：{label}{note} · {job["status"]}'
+            return result
 
 
 class HostCookieSessionInterface(SecureCookieSessionInterface):
@@ -524,7 +557,7 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare
             return podcasts.import_source(source_id, limit, cfg, update, control, data_lock, lock_for,
                 transcript_urls=transcript_urls)
         with data_lock:
-            job_id = jobs.submit(('podcast', source_id), work)
+            job_id = jobs.submit(('podcast', source_id), work, model=cfg)
             podcast_jobs[source_id] = job_id
         return accepted(job_id)
 
@@ -748,7 +781,7 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare
                 with data_lock:
                     saved = wordbook.attach_context(record['word'], meaning, source)
             return dict(meaning=meaning, saved=saved)
-        return accepted(jobs.submit(('word-meaning', book_id, word_meaning.cache_key(context, cfg)), work))
+        return accepted(jobs.submit(('word-meaning', book_id, word_meaning.cache_key(context, cfg)), work, model=cfg))
 
     @app.post('/api/books/<book_id>/articles/<int:index>/collect')
     def collect_word(book_id, index):
@@ -872,7 +905,7 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare
                     on_progress=lambda done, total: update(status=f'摘要已完成 {done}/{total} 批'),
                     on_chars=lambda chars: update(status=f'摘要正在接收 · {chars} 字'))
                 return dict(failed=value.get('failedBatches', 0))
-        return accepted(jobs.submit(('digest', book_id), work))
+        return accepted(jobs.submit(('digest', book_id), work, model=cfg))
 
     @app.post('/api/books/<book_id>/articles/<int:index>/generate-vocab')
     def generate_vocab(book_id, index):
@@ -887,11 +920,12 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare
         def work(update, control):
             with lock_for(book_id):
                 value = gen.generate_vocab(meta, art, settings['vocabLevel'], cfg,
-                    on_progress=lambda done, total, name=None: update(status=f'已完成 {done}/{total} 块 · {name or cfg.get("name", "")}'),
+                    on_progress=lambda done, total, name=None: update(status=f'已完成 {done}/{total} 块'),
                     on_chars=lambda chars: update(status=f'正在接收词表 · {chars} 字'),
+                    on_model=lambda key, actual, active: update(modelRequest=(key, model_info(actual), active)),
                     llm_rotation=settings['llms'], phrases_only=phrases, only_para=para)
                 return dict(failed=value.get('failedPhraseChunks' if phrases else 'failedChunks', 0))
-        return accepted(jobs.submit(('vocab', book_id, index, settings['vocabLevel'], phrases, para), work))
+        return accepted(jobs.submit(('vocab', book_id, index, settings['vocabLevel'], phrases, para), work, model=cfg))
 
     @app.post('/api/books/<book_id>/articles/<int:index>/analyze')
     def analyze(book_id, index):
@@ -919,7 +953,7 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare
                     on_partial=lambda value: update(partial=value), on_progress=lambda p: update(
                         status=(f'正在接收讲解 · {p["chars"]} 字' if p['chars'] else
                                 ('等待深度复核' if deep else '等待模型响应')) + f' · {p["elapsedMs"] / 1000:.0f} 秒'))
-        return accepted(jobs.submit(('analysis', book_id, index, identity, force, deep), work))
+        return accepted(jobs.submit(('analysis', book_id, index, identity, force, deep), work, model=cfg))
 
     @app.get('/api/books/<book_id>/articles/<int:index>/discussion')
     def messages(book_id, index):
@@ -968,7 +1002,7 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare
                 finally:
                     discussion.save(meta, art, history)
                 return dict(excerpted=excerpted)
-        return accepted(jobs.submit(('discussion', book_id, index, question, quote, para), work))
+        return accepted(jobs.submit(('discussion', book_id, index, question, quote, para), work, model=cfg))
 
     @app.post('/api/diagnostics')
     def reader_diagnostics():

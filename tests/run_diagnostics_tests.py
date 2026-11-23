@@ -89,6 +89,42 @@ class DiagnosticTests(unittest.TestCase):
         self.assertEqual([row['event'] for row in events], ['job.submitted', 'job.started', 'job.done'])
         self.assertNotIn('PRIVATE_', json.dumps(events))
 
+    def test_concurrent_model_requests_keep_independent_active_labels(self):
+        jobs = WebTests.app.extensions['jobs']
+        preferred = dict(name='selected', model='primary', apiKey='PRIVATE_TEST_KEY', baseUrl='https://private.invalid')
+        first = dict(name='selected', model='primary')
+        second = dict(name='backup', model='secondary')
+        entered, release = threading.Event(), threading.Event()
+        def action(update, control):
+            update(modelRequest=('chunk-a', first, True))
+            update(modelRequest=('chunk-b', second, True))
+            entered.set()
+            release.wait(3)
+            update(modelRequest=('chunk-a', first, False))
+            update(status='still receiving')
+            # Finishing the primary chunk must not clear the other active request.
+            self.assertEqual(jobs.public(job_id)['activeModels'], [second])
+            update(modelRequest=('chunk-b', second, False))
+        job_id = jobs.submit(('models', 'concurrent'), action, model=preferred)
+        try:
+            self.assertTrue(entered.wait(2))
+            progress = jobs.public(job_id)
+            self.assertEqual(progress['activeModels'], [first, second])
+            self.assertIn('selected（primary） / backup（secondary）', progress['status'])
+            self.assertIn('备用切换', progress['status'])
+            self.assertNotIn('PRIVATE_', json.dumps(progress))
+            self.assertNotIn('private.invalid', json.dumps(progress))
+        finally:
+            release.set()
+        for _ in range(100):
+            result = jobs.public(job_id)
+            if result['state'] not in ('queued', 'running'):
+                break
+            time.sleep(.02)
+        self.assertEqual(result['state'], 'done', result)
+        self.assertEqual(result['activeModels'], [])
+        self.assertEqual(result['usedModels'], [first, second])
+
 
 if __name__ == '__main__':
     unittest.main(defaultTest='DiagnosticTests', verbosity=2)
