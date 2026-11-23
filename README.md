@@ -4,6 +4,34 @@
 
 当前版本 **v0.1.0**。阅读核心由 `haithink/magread-desktop` 提取，本仓库可以独立安装运行，不需要桌面程序、浏览器插件或前端构建工具。
 
+## 界面预览
+
+以下为实际导入的 **WIRED** 刊物和 **Lex Fridman Podcast** 的界面截图，摘要、生词与句子讲解均使用已有生成结果。每张图片单独展示，点击可查看原图；仓库不附带刊物文件或完整文字稿。
+
+**自己的英文阅读室**：按刊物整理封面，查看未读篇数，直接进入摘要目录。
+
+![刊读 Web 书库：真实 WIRED 刊物封面与未读文章数量](docs/screenshots/library.webp)
+
+**先看摘要，再选感兴趣的内容**：将 AI 访谈收在同一播客目录，浏览中英文标题、嘉宾与中文摘要。
+
+![Lex Fridman Podcast 摘要目录：AI 现状与 Demis Hassabis 访谈](docs/screenshots/podcast-digests.webp)
+
+**专注读原文**：柔和标出生词与短语，随时查看段落词表、搜索全文或围绕文章向 AI 提问。
+
+![WIRED 文章阅读：生词标记、段落词表、总词数与阅读进度](docs/screenshots/article-reader.webp)
+
+**短语也能看懂**：按段落查看词汇和短语的本文含义、原文用法，加入个人生词本。图中展示了 `space race` 和 `locked in` 的解释。
+
+![段落生词与短语：space race 和 locked in 的释义、原文用法及收藏按钮](docs/screenshots/vocabulary.webp)
+
+**读懂复杂句子**：结合语境解释句意、翻译与语法结构；有疑问时可重新讲解或主动深度复核。
+
+![真实播客句子讲解：语境含义、参考译文与句子结构](docs/screenshots/sentence-explanation.webp)
+
+**手机上接着读**：紧凑工具栏保留生词表、AI 讨论与阅读进度，正文支持点词查询和双击讲解句子。下图为 iPhone 15 Pro 尺寸（393 × 852）的浏览器布局截图。
+
+<img src="docs/screenshots/mobile-reader.webp" alt="iPhone 15 Pro 尺寸的手机阅读布局：进度工具栏、段落词表和生词标记" width="393">
+
 ## 功能
 
 - EPUB/PDF 上传（单文件 50 MB、全站每天 500 MB）、封面与刊物分类、最近阅读及继续阅读。
