@@ -519,8 +519,8 @@ function watchJob(jobId,onDone,onUpdate,onSettled,onFailure) {
   poll(); return jobId;
 }
 
-async function library(token) {
-  const [data,stats]=await Promise.all([api('/library'),api('/reading-stats')]); if(token!==state.route)return;
+async function library(token,{fresh=false}={}) {
+  const [data,stats]=await Promise.all([api('/library',{fresh}),api('/reading-stats',{fresh})]); if(token!==state.route)return;
   for(const [path,history] of localReading){
     const match=path.match(/^\/books\/([^/]+)\/articles\/(\d+)$/);if(!match)continue;
     const bookId=decodeURIComponent(match[1]),articleIndex=Number(match[2]);
@@ -593,10 +593,11 @@ async function library(token) {
 
 async function podcastSheet() {
   const data=await api('/podcast-sources');
-  const body=el('div',{class:'form-stack'},el('p',{class:'muted'},'从官方网站导入文字 Transcript，同一播客作为一本书，每期作为一篇文章。自动使用默认 LLM 生成中文摘要，暂不生成生词表；再次导入会跳过已有内容并补缺。'));
+  const body=el('div',{class:'form-stack'},el('p',{class:'muted'},'从官方网站导入文字稿，或在服务器本地将节目音频转为文字。同一播客作为一本书，每期作为一篇文章。自动生成中文摘要，暂不生成生词表；再次导入会跳过已有内容并补缺。'));
   const sheet=showSheet('刊物来源 · Podcast',body);
   for(const source of data.sources) {
     let jobId=source.jobId;
+    const count=el('select',{'aria-label':`${source.name} 导入期数`},...Array.from(new Set([1,3,source.limit])).map(n=>el('option',{value:n,selected:n===(source.defaultLimit||source.limit)},`最近 ${n} 期`)));
     const status=el('p',{class:'podcast-status','aria-live':'polite'},source.status.status||'尚未导入');
     const progress=el('progress',{max:source.limit*2,value:0,'aria-label':'Podcast 导入进度'});
     const failures=el('div',{class:'podcast-failures'});
@@ -607,25 +608,25 @@ async function podcastSheet() {
       stop.disabled=!['queued','running'].includes(job.state||result.state);
       progress.max=Math.max(1,(result.total||source.limit)*2);
       progress.value=(result.imported||0)+(result.existing||0)+(result.summaries||0)+(result.failures||[]).length;
-      failures.replaceChildren(...(result.failures||[]).map(f=>el('p',{},`${f.stage==='summary'?'摘要':'Transcript'}待补缺：${f.title}`)));
+      failures.replaceChildren(...(result.failures||[]).map(f=>el('p',{},`${f.stage==='summary'?'摘要':'Transcript'}待补缺：${f.title}。${f.message||''}`)));
     };
-    const done=async job=>{if(sheet!==state.sheet)return;render(job);start.disabled=false;if(location.hash==='#/library'||!location.hash)await library(state.route);};
+    const done=async job=>{if(sheet===state.sheet){render(job);start.disabled=false;}if(location.hash==='#/library'||!location.hash)await library(state.route,{fresh:true});};
     const stop=button('停止导入',action(async()=>{
       if(jobId)await api(`/jobs/${encodeURIComponent(jobId)}/stop`,{method:'POST',data:{}});
       stop.disabled=true;
     }));
     stop.disabled=true;
-    const start=button(`导入 / 更新最近 ${source.limit} 期`,action(async()=>{
+    const start=button(source.transcription?'导入 / 更新所选期数':`导入 / 更新最近 ${source.limit} 期`,action(async()=>{
       start.disabled=true;
-      try{jobId=await runJob(`/podcast-sources/${encodeURIComponent(source.id)}/import`,{limit:source.limit},done,render);}
+      try{jobId=await runJob(`/podcast-sources/${encodeURIComponent(source.id)}/import`,{limit:source.transcription?Number(count.value):source.limit},done,render);}
       catch(error){start.disabled=false;throw error;}
     }),'primary');
     const running=['queued','running'].includes(source.status.state);
     start.disabled=running;
     body.append(el('section',{class:'podcast-source'},el('h3',{},source.name),
       el('a',{href:source.url,target:'_blank',rel:'noopener noreferrer',class:'duplicate-source'},'官方网站 ↗'),
-      el('p',{class:'count'},'首页只显示一个系列入口，使用官网封面。长篇摘要采用覆盖全文的分段摘录。'),
-      status,progress,failures,el('div',{class:'row'},start,stop)));
+      el('p',{class:'count'},source.transcription?'本地音频转写，默认先导入 1 期；可选官网当前目录最近 3 或 9 期。首次需下载语音模型；正文标注机器转写，可能存在听写错误。':'首页只显示一个系列入口，使用官网封面。长篇摘要采用覆盖全文的分段摘录。'),
+      status,progress,failures,el('div',{class:'row'},source.transcription?count:null,start,stop)));
     if(running&&source.jobId)watchJob(source.jobId,done,render);
     render({status:source.status.status,result:source.status});
   }
@@ -730,7 +731,7 @@ async function digestPage(bookId,token) {
         const result=await api(`/books/${encodeURIComponent(a.bookId||bookId)}/articles/${a.articleIndex??a.index}/tags`,{
           method:'POST',data:{tags:input.value.split(/[,，、;；\n]+/).map(s=>s.trim()).filter(Boolean)}});
         if(token!==state.route)return;
-        a.tags=result.tags;$('.article-tags',cards.get(a.index)).replaceWith(tagRow(a));
+        a.tags=result.tags;await ReadingCache.put('/books/'+encodeURIComponent(bookId),data);$('.article-tags',cards.get(a.index)).replaceWith(tagRow(a));
         if(sheet===state.sheet)closeSheet();render();toast('标签已保存');
       }catch(failure){error.textContent=failure.message;error.hidden=false;}finally{submit.disabled=false;}
     };
@@ -741,13 +742,14 @@ async function digestPage(bookId,token) {
     select.value=a.state;
     select.onchange=action(async()=>{const previous=a.state;select.disabled=true;
       try{await api(`/books/${encodeURIComponent(a.bookId||bookId)}/state`,{method:'POST',data:{articleIndex:a.articleIndex??a.index,state:select.value}});a.state=select.value;
+        await ReadingCache.put('/books/'+encodeURIComponent(bookId),data);await ReadingCache.remove(key=>key==='/library');
         $('.state-pill',cards.get(a.index)).textContent=labels[a.state];render();}
       catch(error){select.value=previous;throw error;}finally{select.disabled=false;}
     });return select;
   };
   for(const a of data.articles) {
     const card=el('article',{class:'article-card'},
-      el('div',{class:'card-top'},el('span',{},isSeries?`EPISODE #${a.episodeNumber} · ${a.publishedAt||''}`:`ARTICLE ${String(a.index+1).padStart(2,'0')}`),el('span',{class:'state-pill'},labels[a.state])),
+      el('div',{class:'card-top'},el('span',{},isSeries?`${a.episodeNumber?'EPISODE #'+a.episodeNumber:'EPISODE'} · ${a.publishedAt||''}`:`ARTICLE ${String(a.index+1).padStart(2,'0')}`),el('span',{class:'state-pill'},labels[a.state])),
       el('a',{href:articleLink(a)},el('h2',{},a.titleEn),a.titleZh?el('h3',{},a.titleZh):null),
       tagRow(a),
       el('p',{},a.summaryZh||'这篇文章尚未生成摘要，可以直接打开原文阅读。'),
@@ -782,7 +784,8 @@ async function digestPage(bookId,token) {
   view.replaceChildren(el('a',{href:'#/library',class:'back'},'← 我的书库'),
     el('div',{class:'digest-head'},heading(isSeries?'PODCAST EPISODES':'ISSUE CONTENTS',data.title||data.fileName.replace(/\.(epub|pdf)$/i,''),issueCount,[
       button('生成 / 补缺摘要',action(()=>runJob(`/books/${encodeURIComponent(bookId)}/generate-digest`,{},()=>{if(token===state.route)route();})),'primary')
-    ])),...(data.sourceUrl?[el('div',{class:'podcast-provenance'},el('a',{href:data.sourceUrl,target:'_blank',rel:'noopener noreferrer'},isSeries?'播客官网 ↗':'官方 Transcript ↗'),
+    ])),...(data.sourceUrl?[el('div',{class:'podcast-provenance'},el('a',{href:data.sourceUrl,target:'_blank',rel:'noopener noreferrer'},isSeries?'播客官网 ↗':data.transcriptType==='machine'?'官方节目 / 音频 ↗':'官方 Transcript ↗'),
+      data.machineTranscripts||data.transcriptType==='machine'?el('span',{class:'count'},'机器转写 · 保留时间戳，可能存在听写错误，原文未经 LLM 改写。'):null,
       data.excerpted?el('span',{class:'count'},'摘要基于覆盖全文的分段摘录；正文为完整 Transcript。'):null)]:[]),
     recent.section,el('div',{class:'filters'},q,duplicateCount?el('label',{class:'duplicate-toggle'},showDuplicates,`显示重复文章（${duplicateCount}）`):null),topics,tabs,grid);
   render();
@@ -1567,7 +1570,7 @@ async function readerPage(bookId,index,token,startParagraph=null) {
     el('h1',{},data.article.title),data.titleZh?el('h2',{},data.titleZh):null,
     el('div',{class:'reader-meta'},el('span',{},`${data.wordCount.toLocaleString()} 词`),el('span',{},`约 ${Math.max(1,Math.ceil(data.wordCount/220))} 分钟`),
       el('span',{},`${data.article.paragraphs.length} 段`)),
-    data.sourceUrl?el('a',{class:'duplicate-source',href:data.sourceUrl,target:'_blank',rel:'noopener noreferrer'},'官方 Transcript ↗'):null,
+    data.sourceUrl?el('a',{class:'duplicate-source',href:data.sourceUrl,target:'_blank',rel:'noopener noreferrer'},data.transcriptType==='machine'?'机器转写 · 官方音频 ↗':'官方 Transcript ↗'):null,
     data.summaryZh?el('details',{class:'reader-summary'},el('summary',{},data.excerpted?'整期摘要 · 全文分段摘录':'文章摘要'),el('p',{},data.summaryZh)):null),
     el('p',{class:'touch-reading-help',id:'touch-reading-help'}),selection,body,remoteProgress);
   view.replaceChildren(article);window.scrollTo(0,0);

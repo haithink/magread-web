@@ -125,7 +125,7 @@ def _official_image(spec, control=None):
     target = spec['coverUrl']
     for _ in range(4):
         parts = urlsplit(target)
-        if (parts.scheme != 'https' or parts.netloc.lower() != spec['host'] or
+        if (parts.scheme != 'https' or parts.netloc.lower() != spec.get('coverHost', spec['host']) or
                 parts.username or parts.password or parts.query or parts.fragment):
             raise ValueError('封面地址不属于播客官网')
         if control:

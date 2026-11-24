@@ -15,11 +15,15 @@ import requests
 
 from kandu import core_config as config, core_gen as gen, core_llm as llm
 from kandu import core_parsers as store, core_prompts
-from webapp import podcast_covers
+from webapp import podcast_covers, hidden_gems
 
 SOURCES = {'lex-fridman': dict(id='lex-fridman', name='Lex Fridman Podcast',
     url='https://lexfridman.com/podcast/', host='lexfridman.com', limit=50,
-    coverUrl='https://lexfridman.com/wordpress/wp-content/uploads/powerpress/lex_fridman_podcast_cover_3000.jpg')}
+    coverUrl='https://lexfridman.com/wordpress/wp-content/uploads/powerpress/lex_fridman_podcast_cover_3000.jpg'),
+    'hidden-gems': dict(id='hidden-gems', name='Motley Fool Hidden Gems Investing',
+        url='https://www.fool.com/podcasts/hidden-gems/', host='www.fool.com', limit=9, defaultLimit=1,
+        transcription=True, coverHost='g.foolcdn.com',
+        coverUrl='https://g.foolcdn.com/misc-assets/logo-podcast-hidden-gems.png')}
 SUMMARY_METHOD = 'whole-transcript-excerpts-v1'
 
 
@@ -87,6 +91,8 @@ def fetch_html(spec, url, control):
 
 def catalog(spec, html, limit):
     """The homepage also repeats selected episodes: use only its full episode list."""
+    if spec['id'] == 'hidden-gems':
+        return hidden_gems.catalog(spec, html, limit)
     soup = BeautifulSoup(html, 'html.parser')
     rows = soup.select('.episodes-all .episode-item')
     if not rows:
@@ -249,13 +255,15 @@ def validate_selection(spec, urls):
     if urls is None:
         return None
     if not isinstance(urls, list) or not 1 <= len(urls) <= spec['limit']:
-        raise ValueError('指定节目应为 1 至 50 个 Transcript 地址')
+        raise ValueError(f'指定节目应为 1 至 {spec["limit"]} 个官网单期地址')
     selected = []
     for url in urls:
         if not isinstance(url, str):
             raise ValueError('Transcript 地址必须是文本')
         url = checked_url(spec, url).rstrip('/')
-        if not url.endswith('-transcript') or url in selected:
+        if spec['id'] == 'hidden-gems':
+            hidden_gems.episode_url(spec, url)
+        if (spec['id'] != 'hidden-gems' and not url.endswith('-transcript')) or url in selected:
             raise ValueError('Transcript 地址无效或重复')
         selected.append(url)
     return selected
@@ -264,7 +272,7 @@ def validate_selection(spec, urls):
 def import_source(source_id, limit, cfg, update, control, data_lock=None, lock_for=None, transcript_urls=None):
     spec = source(source_id)
     if type(limit) is not int or not 1 <= limit <= spec['limit']:
-        raise ValueError('导入期数应为 1 至 50 的整数')
+        raise ValueError(f'导入期数应为 1 至 {spec["limit"]} 的整数')
     selected = validate_selection(spec, transcript_urls)
     if selected is not None:
         limit = len(selected)
@@ -298,7 +306,10 @@ def import_source(source_id, limit, cfg, update, control, data_lock=None, lock_f
                 if meta and Path(meta['path']).is_file():
                     report['existing'] += 1
                 else:
-                    item = transcript(episode, fetch_html(spec, episode['sourceUrl'], control))
+                    item = (hidden_gems.transcript(episode, control,
+                        lambda **v:progress(f'第 {i+1}/{len(episodes)} 期 · '+v.get('status', '')))
+                        if spec['id'] == 'hidden-gems' else
+                        transcript(episode, fetch_html(spec, episode['sourceUrl'], control)))
                     path = config.app_dir() / 'books' / 'podcasts' / source_id / f'{episode["id"]}.epub'
                     write_epub(path, item, spec)
                     now = int(time.time()*1000)
@@ -306,10 +317,14 @@ def import_source(source_id, limit, cfg, update, control, data_lock=None, lock_f
                         size=path.stat().st_size, lastModified=int(path.stat().st_mtime*1000), addedAt=now,
                         title=item['title'], publication=spec['name'], sourceId=source_id, sourceType='podcast',
                         sourceUrl=item['sourceUrl'], episodeNumber=item['episodeNumber'],
-                        publishedAt=item['publishedAt'], guest=item['guest'])
+                        publishedAt=item['publishedAt'], guest=item['guest'],
+                        transcriptType=item.get('transcriptType', 'official'),
+                        transcriptionModel=item.get('transcriptionModel', ''))
                     store.ensure_content(meta)
                     store._atomic_json_write(store._cache_dir(meta['id'])/'podcast-source.json',
-                        dict(sourceUrl=item['sourceUrl'], chapters=item['chapters']))
+                        dict(sourceUrl=item['sourceUrl'], chapters=item['chapters'],
+                            transcriptType=meta['transcriptType'], transcriptionModel=meta['transcriptionModel'],
+                            segments=item.get('transcriptionSegments', [])))
                     with data_lock if data_lock is not None else nullcontext():
                         entries = store.load_library()
                         entries = [e for e in entries if e['id'] != meta['id']]
@@ -319,9 +334,10 @@ def import_source(source_id, limit, cfg, update, control, data_lock=None, lock_f
                 report['books'].append(meta['id'])
             except llm.RequestCancelled:
                 raise
-            except Exception:
+            except Exception as error:
                 report['failures'].append(dict(title=episode['title'], stage='transcript',
-                    message='Transcript 未入库，可再次重试', bookId=episode['id']))
+                    message=(str(error) if spec['id'] == 'hidden-gems' and isinstance(error, ValueError)
+                        else 'Transcript 未入库，可再次重试'), bookId=episode['id']))
             progress(f'Transcript 已处理 {i+1}/{len(episodes)}', failed=len(report['failures']))
         for i, meta in enumerate(ready):
             control.check()

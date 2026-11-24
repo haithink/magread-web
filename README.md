@@ -50,7 +50,15 @@
 
 ## Podcast Transcript 来源
 
-在首页点击「刊物来源」，选择「导入 / 更新最近 50 期」。使用已配置的默认 LLM 自动生成摘要；文字抓取和摘要任务在服务器后台执行，界面显示阶段进度。关闭页面不会停止任务，重新打开「刊物来源」可查看当前任务。服务重启会中断任务，再次导入可复用已入库的 Transcript 和已有摘要，仅补缺，不覆盖阅读记录。
+**Hidden Gems 本地转写**：在首页「刊物来源」选择 Motley Fool Hidden Gems Investing，默认先导入最近 1 期，可选 3 或 9 期，目前范围为官网首页提供的最近 9 期。首页只显示一个系列封面，进入后按日期倒序浏览各期摘要，与 Lex 播客使用相同的阅读、标签、收藏和讨论功能。服务器从官网取得单期信息及音频，用 faster-whisper 转写英文、保留时间戳，再自动生成摘要；节目简介不充当正文，明确标注「机器转写」，不调用 LLM 改写听写结果，也不推测说话人身份。尚未实现历史分页抓取。
+
+本地转写是可选组件：在服务器虚拟环境运行 `python -m pip install -r requirements-transcription.txt` 后重启服务。普通 Web / Lex 来源不需要安装。首次转写会下载语音模型，之后优先使用本地缓存；依赖缺失时界面明确提示安装文件名。默认 `small.en`、CPU int8、4 个线程；可在数据目录 `podcasts/transcription.json` 中配置，例如 `{"model":"small.en","device":"cpu"}`。支持 `tiny.en`、`base.en`、`small.en`、`medium.en`、`distil-large-v3`、`large-v3`、`large-v3-turbo`，设备可选 `cpu` 或 `cuda`。CUDA 需与 CTranslate2 兼容的 NVIDIA 驱动及 CUDA 12 / cuDNN 9 运行库；Windows 可在同一虚拟环境安装 `nvidia-cublas-cu12`、`nvidia-cudnn-cu12`，程序会注册 DLL 目录，失败后可改回 CPU 补缺。PyAV 提供音频解码，无须另装 FFmpeg。
+
+下载和转写均显示进度并可停止，转写在独立子进程中执行，停止会终止子进程。单期音频限制 150 MB、3 小时；转写任务上限 2 小时。下载只接受官网指定的 Megaphone 文件与内置托管域名，逐次验证跳转。完整转写保存后删除临时音频；失败保留完整下载供重试，半成品不创建文章。重复导入复用已有正文和摘要，保留阅读记录。
+
+Hidden Gems 数据均在应用数据目录：文字 EPUB 在 `books/podcasts/hidden-gems/`，语音模型在 `models/faster-whisper/`，带时间戳的转写 JSON 与进度、工作日志在 `podcasts/transcripts/`，待重试音频在 `podcasts/audio/hidden-gems/`，导入状态在 `podcasts/hidden-gems.json`。这些运行内容不进入 Git；迁移时与其他应用数据一起保留。
+
+**Lex Fridman 官方文字稿**：在首页点击「刊物来源」，选择「导入 / 更新最近 50 期」。使用已配置的默认 LLM 自动生成摘要；文字抓取和摘要任务在服务器后台执行，界面显示阶段进度。关闭页面不会停止任务，重新打开「刊物来源」可查看当前任务。服务重启会中断任务，再次导入可复用已入库的 Transcript 和已有摘要，仅补缺，不覆盖阅读记录。
 
 当前支持 **Lex Fridman Podcast**。从官网「All Episodes」列表由新到旧选择最近 50 份可用 Transcript，跳过没有文字稿的节目，避免精选区重复。首页只显示一本「Lex Fridman Podcast」，点击后按期号倒序浏览各期摘要，可搜索期号、日期、嘉宾和摘要，标记已读、未读或不感兴趣；阅读后返回同一系列目录。系列使用官网提供的播客封面，在导入后台下载并缓存，官网不可用时使用简洁文字封面，下次导入可补齐；首页加载不访问外网。
 
@@ -311,6 +319,7 @@ python tests/run_reading_stats_tests.py
 python tests/run_reading_cache_tests.py
 python tests/run_article_duplicate_tests.py
 python tests/run_podcast_tests.py
+python tests/run_hidden_gems_tests.py
 python tests/run_word_meaning_tests.py
 python tests/run_phrase_tests.py
 python tests/run_privacy_tests.py
@@ -320,6 +329,7 @@ python tests/run_web_browser_tests.py
 python tests/run_access_upload_browser_tests.py
 python tests/run_article_duplicate_browser_tests.py
 python tests/run_podcast_browser_tests.py
+python tests/run_hidden_gems_browser_tests.py
 python tests/run_lookup_browser_tests.py
 python tests/run_reading_cache_browser_tests.py
 python tests/run_phrase_browser_tests.py

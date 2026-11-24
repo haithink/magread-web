@@ -44,6 +44,10 @@
 
 ## 其他依赖与打包组件
 
+可选音频转写使用 faster-whisper（MIT，SYSTRAN）及 CTranslate2、PyAV、ONNX Runtime 等依赖，见 `requirements-transcription.txt`。语音模型通过 Hugging Face 下载至仓库外，按所选模型仓库的许可证使用，不随本项目分发模型权重。NVIDIA CUDA / cuDNN 是可选运行库，按 NVIDIA 的许可使用。
+
+播客文字与音频来自相应节目官方来源，仅由用户运行时获取；其内容版权属于原权利人，不因本项目开源而转为 AGPL。机器转写、个人摘要和音频均不纳入源码仓库。
+
 `requirements.txt` 中的 Flask、Waitress、Requests、BeautifulSoup、Pillow 等依赖，
 以及 Python、SQLite 等组件，按各自的上游许可证使用。Web 版不需要桌面 GUI 或 PyInstaller。
 分发应用时应保留所包含第三方组件要求的版权、许可证及声明。

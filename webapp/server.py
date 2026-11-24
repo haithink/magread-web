@@ -544,15 +544,16 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare
                 elif saved.get('state') == 'running':
                     saved = dict(saved, state='interrupted', status='上次导入已中断，再次导入可补缺')
                 items.append(dict(id=spec['id'], name=spec['name'], url=spec['url'], limit=spec['limit'],
-                    status=saved, jobId=job_id))
+                    defaultLimit=spec.get('defaultLimit', spec['limit']),
+                    transcription=bool(spec.get('transcription')), status=saved, jobId=job_id))
         return jsonify(sources=items)
 
     @app.post('/api/podcast-sources/<source_id>/import')
     def import_podcast(source_id):
         spec, data = podcasts.source(source_id), payload()
-        limit = data.get('limit', spec['limit'])
+        limit = data.get('limit', spec.get('defaultLimit', spec['limit']))
         if type(limit) is not int or not 1 <= limit <= spec['limit']:
-            abort(400, '导入期数应为 1 至 50 的整数')
+            abort(400, f'导入期数应为 1 至 {spec["limit"]} 的整数')
         transcript_urls = podcasts.validate_selection(spec, data.get('transcriptUrls'))
         cfg = model(data)
         def work(update, control):
@@ -632,6 +633,7 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare
         if meta.get('sourceType') == 'podcast-series':
             return jsonify(id=book_id, fileName=meta['fileName'], title=meta['title'], ext=meta['ext'],
                 sourceType=meta['sourceType'], sourceUrl=meta['sourceUrl'], excerpted=True,
+                machineTranscripts=bool(podcasts.source(meta['sourceId']).get('transcription')),
                 articles=podcast_library.directory(meta), duplicateCount=0)
         content = store.ensure_content(meta)
         duplicates = article_duplicates.earlier_occurrences(meta, content['articles'])
@@ -647,6 +649,7 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare
         return jsonify(id=book_id, fileName=meta['fileName'], ext=meta['ext'], articles=items,
                        title=meta.get('title', ''), sourceUrl=meta.get('sourceUrl', ''),
                        sourceType=meta.get('sourceType', ''), excerpted=bool(digest.get('excerpted')),
+                       transcriptType=meta.get('transcriptType', ''),
                        duplicateCount=len(duplicates))
 
     @app.post('/api/books/<book_id>/articles/<int:index>/tags')
@@ -679,6 +682,7 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare
             bookTitle=meta.get('title') or meta['fileName'], ext=meta['ext'], history=history,
             progressServerAt=(history or {}).get('lastReadAt', 0),
             sourceUrl=meta.get('sourceUrl', ''), excerpted=bool((store.load_digest(book_id) or {}).get('excerpted')),
+            transcriptType=meta.get('transcriptType', ''), transcriptionModel=meta.get('transcriptionModel', ''),
             parentBookId=podcast_library.parent_id(meta),
             readingTiming=reading_activity.article_timing(book_id,index),
             wordCount=len(gen._TOKEN.findall(' '.join(art['paragraphs']))),

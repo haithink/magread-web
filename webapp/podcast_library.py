@@ -50,6 +50,7 @@ def directory(meta):
             titleEn=episode.get('title') or episode['fileName'], titleZh=summary.get('titleZh', ''),
             summaryZh=summary.get('summaryZh', ''), episodeNumber=episode.get('episodeNumber', 0),
             publishedAt=episode.get('publishedAt', ''), guest=episode.get('guest', ''),
+            transcriptType=episode.get('transcriptType', 'official'),
             sourceUrl=episode.get('sourceUrl', ''),
             tags=article_tags.load(episode['id']).get('0', []),
             state=store.load_article_states(episode['id']).get('0', 'unread'),
