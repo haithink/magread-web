@@ -2,6 +2,9 @@
 
 // Native SVG charts keep private statistics local, without a CDN or chart SDK.
 function readingAnalyticsPanel(analytics) {
+  const unified=analytics.daily.every(day=>Number.isFinite(day.readWords));
+  const readingKey=unified?'readWords':'completedWords';
+  const readingLabel=unified?'阅读词数':'已读文章词数';
   const node=(tag,attrs={},...children)=>{
     const element=document.createElement(tag);
     for(const [k,v]of Object.entries(attrs))element.setAttribute(k,v);
@@ -89,23 +92,24 @@ function readingAnalyticsPanel(analytics) {
     drawCallbacks.push(draw);
     return panel;
   }
-  chart('每日阅读词数','包含尚未读完的文章；可对比按标题去重、归到首次完成日的读完词数。',[
-    {key:'measuredWords',label:'计时阅读'},{key:'completedWords',label:'读完文章'}],'词');
+  chart('每日阅读词数',unified?'包含 Web 与插件等全部来源；未完成按采样计入，完成当天补足全文，同标题不重复计词。':
+    '当前为旧版缓存，暂显示已读文章词数；联网更新后包含未完成阅读。',[
+    {key:readingKey,label:readingLabel},...(unified?[{key:'completedWords',label:'读完文章'}]:[])],'词');
   chart('每日阅读速度','当天计时阅读词数 ÷ 有效分钟数；至少 30 秒、20 词才显示。空白表示样本不足。',[
     {key:'wordsPerMinute',label:'估算速度'}],'词/分');
   root.append(chartGrid);
 
   const extra=node('div',{class:'reading-insights-grid'});
   const calendar=node('section',{class:'reading-chart-panel reading-calendar'},node('h3',{},'阅读日历'),
-    node('p',{class:'count'},`最近 12 周 · 最长连续 ${analytics.longestStreak} 天 · 颜色代表有效阅读时长`));
+    node('p',{class:'count'},`最近 12 周 · 最长连续 ${analytics.longestStreak} 天 · 颜色代表${readingLabel}`));
   const cells=node('div',{class:'reading-heatmap','aria-label':'最近 12 周阅读日历'});
   const calendarDetail=node('p',{class:'reading-chart-detail','aria-live':'polite'},'选择一天查看阅读时长和词数。');
   const lastDay=new Date(analytics.daily.at(-1).date+'T12:00:00Z');
   const calendarDays=analytics.daily.slice(-(77+(lastDay.getUTCDay()+6)%7+1));
   calendar.append(node('div',{class:'calendar-date-range'},calendarDays[0].date+' — '+calendarDays.at(-1).date));
   for(const row of calendarDays) {
-    const minutes=row.activeMs/60000,level=minutes>=60?4:minutes>=30?3:minutes>=10?2:minutes>0?1:0;
-    const text=`${row.date} · ${Math.round(minutes)} 分钟 · 计时阅读 ${fmt(row.measuredWords)} 词 · 读完 ${row.completedArticles} 篇`;
+    const words=row[readingKey],minutes=row.activeMs/60000,level=words>=10000?4:words>=5000?3:words>=2000?2:words>0?1:0;
+    const text=`${row.date} · ${readingLabel} ${fmt(words)} 词 · ${minutes>0?Math.round(minutes)+' 分钟':'无计时记录'} · 计时阅读 ${fmt(row.measuredWords)} 词 · 读完 ${row.completedArticles} 篇`;
     const cell=node('button',{type:'button',class:'heatmap-cell heat-level-'+level,title:text,'aria-label':text,'data-date':row.date});
     const describe=()=>{calendarDetail.textContent=text;};
     cell.addEventListener('focus',describe);cell.addEventListener('pointerenter',describe);cell.addEventListener('click',describe);cells.append(cell);
@@ -138,12 +142,12 @@ function readingAnalyticsPanel(analytics) {
     node('p',{},'累计实际阅读词数（估算）＝已完成文章全文词数＋未读完文章的计时阅读估算，与图表日期范围无关。历史已读文章和 Chrome 同步完成记录也按全文计入；完成后用全文词数替换此前部分阅读量，不再重复叠加。已完成同标题各出处取最大全文词数；未完成同标题各出处取最大的累计计时词数。提前标记已读也按全文计算。'),
     node('p',{},'来源分布默认包含未完成文章，统计全部历史，不受曲线日期范围影响。同标题未完成文章归入累计计时词数最多的出处，相同则取最早记录；完成后归入最早完成的出处，每篇只计一次。尚未产生计时词数的文章不会计入来源阅读量。'),
     node('p',{},'有效时长只累计前台且获得焦点的阅读页面；生成当前文章生词/短语、切换标签页、弹出查词/讲解窗口、手动暂停或 90 秒无操作会暂停。'),
-    node('p',{},'计时阅读词数根据正文位置前进估算，不代表逐字阅读或理解；快速拖动或定位跳转不计跳过的词数，返回原处继续阅读仍可累计。到达文末不自动标记已读；手动标记后，无论当前位置在哪里都按全文计入累计阅读量。同一次阅读往回翻不重复计词，重新打开文章从头复读则计入当天阅读量。文章和每日速度均为计时词数除以有效分钟数，跨文章平均按总时间加权。'),
-    node('p',{},'每日曲线及阅读速度继续使用原始计时采样，和累计阅读量的统计口径不同。历史文章或提前标记已读所计入的全文词数不会补算为计时样本、有效时长或速度。多窗口或多设备同时打开时，有效时长不重复累计。日期按当前设备的 UTC 偏移划分；午夜前后的计时会拆分到两天。')));
+    node('p',{},'计时阅读词数根据正文位置前进估算，不代表逐字阅读或理解；快速拖动或定位跳转不计跳过的词数，返回原处继续阅读仍可累计。到达文末不自动标记已读；手动标记后，无论当前位置在哪里都按全文计入累计阅读量。同一次阅读往回翻不重复计词，重新打开文章从头复读仍可产生计时样本。文章和每日速度均为计时词数除以有效分钟数，跨文章平均按总时间加权。'),
+    node('p',{},'每日阅读词数与日历汇总全部来源，同标题取累计采样最大的出处；先前计入的词数保留在原日期，首次完成当天只补足与全文词数的差额。没有计时的历史文章及插件记录按全文归到首次完成日；完成后的重读不再次增加去重阅读量。改回未读后按现存记录重算。速度仍只用原始计时采样，不根据完成记录推测耗时。多窗口或多设备同时打开时，有效时长不重复累计。日期按当前设备的 UTC 偏移划分；午夜前后的计时会拆分到两天。')));
   const update=()=>{
     const days=analytics.daily.slice(-Number(range.value));
-    const words=days.reduce((s,d)=>s+d.measuredWords,0),ms=days.reduce((s,d)=>s+d.activeMs,0);
-    period.textContent=`${days[0].date} — ${days.at(-1).date} · 计时阅读 ${fmt(words)} 词 · 有效阅读 ${Math.round(ms/60000)} 分钟 · ${days.filter(d=>d.activeMs>0).length} 个阅读日`;
+    const words=days.reduce((s,d)=>s+d[readingKey],0),ms=days.reduce((s,d)=>s+d.activeMs,0);
+    period.textContent=`${days[0].date} — ${days.at(-1).date} · ${readingLabel} ${fmt(words)} 词 · 有效阅读 ${Math.round(ms/60000)} 分钟 · ${days.filter(d=>d[readingKey]>0||d.activeMs>0).length} 个阅读日`;
     drawCallbacks.forEach(draw=>draw());
   };
   range.addEventListener('change',update);

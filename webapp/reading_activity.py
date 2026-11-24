@@ -196,6 +196,53 @@ def _streak(days, today):
     return current, longest
 
 
+def volume_by_day(articles, tz):
+    """Rebuild deduplicated daily increments without modifying the timing ledger.
+
+    Per-title progress is the largest cumulative sample across its sources.
+    Completion fills only the remaining words; later rereading affects timing,
+    not unique reading volume. Replay all history before filtering chart dates.
+    """
+    completed, events = {}, []
+    for article in articles:
+        key = reading_stats.title_key(article['title'])
+        stamp = min(s.get('firstReadAt', s['readAt']) for s in article['sources'])
+        completed[key] = article['wordCount']
+        events.append((stamp, 1, key, '', article['wordCount']))
+    if database().is_file():
+        with connection() as db:
+            for row in db.execute('SELECT source_id,title_key,started_at,ended_at,active_ms,words '
+                                  'FROM intervals WHERE words>0'):
+                cursor, end, allocated = row['started_at'], row['ended_at'], 0
+                while cursor < end:
+                    local = datetime.fromtimestamp(cursor/1000, tz)
+                    tomorrow = datetime.combine(local.date()+timedelta(days=1), datetime.min.time(), tz)
+                    boundary = min(end, int(tomorrow.timestamp()*1000))
+                    cumulative = round(row['words']*(boundary-row['started_at'])/max(1,row['active_ms']))
+                    # Attribute the segment ending at midnight to the prior day.
+                    events.append((boundary-1, 0, row['title_key'], row['source_id'], cumulative-allocated))
+                    cursor, allocated = boundary, cumulative
+    by_source, credited, finished = defaultdict(lambda:defaultdict(int)), defaultdict(int), set()
+    daily = defaultdict(int)
+    for stamp, completion, key, source_id, words in sorted(events):
+        if key in finished:
+            continue
+        if completion:
+            target = words
+            finished.add(key)
+        else:
+            by_source[key][source_id] += words
+            target = max(credited[key], by_source[key][source_id])
+            if key in completed:
+                target = min(target, completed[key])
+        increase = max(0, target-credited[key])
+        if increase:
+            day = datetime.fromtimestamp(stamp/1000, tz).date().isoformat()
+            daily[day] += increase
+            credited[key] += increase
+    return daily
+
+
 def report(articles, days=365, timezone_offset=0, publications=None):
     """Completed volume and measured volume are different, explicitly labeled metrics."""
     tz = timezone(timedelta(minutes=-timezone_offset))
@@ -204,7 +251,7 @@ def report(articles, days=365, timezone_offset=0, publications=None):
     start = today - timedelta(days=days-1)
     first_ms = int(datetime.combine(start, datetime.min.time(), tz).timestamp()*1000)
     daily = { (start+timedelta(days=i)).isoformat():dict(date=(start+timedelta(days=i)).isoformat(),
-        activeMs=0, measuredWords=0, completedWords=0, completedArticles=0) for i in range(days)}
+        activeMs=0, measuredWords=0, readWords=0, completedWords=0, completedArticles=0) for i in range(days)}
     by_title, partial_by_title, active_dates = {}, {}, set()
     total_words = total_ms = 0
     if database().is_file():
@@ -259,7 +306,10 @@ def report(articles, days=365, timezone_offset=0, publications=None):
         label = label or primary['source']
         distribution[label]['articleCount'] += 1
         distribution[label]['words'] += article['wordCount']
-    for value in daily.values():
+    volume = volume_by_day(articles, tz)
+    active_dates.update(volume)
+    for date, value in daily.items():
+        value['readWords'] = volume.get(date, 0)
         value['wordsPerMinute'] = speed(value['measuredWords'], value['activeMs'])
     current, longest = _streak(active_dates, today)
     completed = {reading_stats.title_key(article['title']): article['wordCount'] for article in articles}

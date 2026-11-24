@@ -107,6 +107,7 @@ body:has(#sheet-wait:not([hidden])) #jobbar{display:none}
 .pwa-settings{margin-top:24px}.pwa-settings p{line-height:1.8}.pwa-update{position:fixed;z-index:25;left:16px;right:16px;bottom:calc(16px + env(safe-area-inset-bottom));max-width:600px;margin:auto;display:flex;align-items:center;justify-content:space-between;gap:14px;padding:12px 16px;background:var(--card);border:1px solid #cdd9c5;border-radius:12px;box-shadow:0 6px 24px #183f3526;font:13px/1.6 var(--sans)}.pwa-update .row{flex:none;gap:8px}.pwa-update button{min-height:44px;white-space:nowrap}body:has(#sheet[open]) .pwa-update,body:has(#selection-tools:not([hidden])) .pwa-update,body:has(.reader-remote-progress:not([hidden])) .pwa-update{display:none}@media(max-width:480px){.pwa-update{align-items:flex-start;flex-direction:column;gap:8px}.pwa-update .row{align-self:flex-end}}@media(display-mode:standalone){.site-footer{padding-bottom:calc(20px + env(safe-area-inset-bottom))}}
 @media(max-width:600px){.reader-remote-progress{width:calc(100vw - 24px);max-width:none;flex-wrap:wrap;gap:8px;padding:12px}.reader-remote-progress .row{width:100%}.reader-remote-progress button{min-height:44px;flex:1}}
 .hover-actions{flex-wrap:wrap;gap:8px}
+.chart-line.series-readWords{stroke:var(--green)}.chart-dot.series-readWords{fill:var(--green)}
 .sync-device-form{display:flex;align-items:flex-end;flex-wrap:wrap;gap:12px;margin:18px 0}
 .sync-device-form label{display:grid;gap:6px;flex:1;min-width:180px}
 .sync-device-form input{width:100%;box-sizing:border-box}
