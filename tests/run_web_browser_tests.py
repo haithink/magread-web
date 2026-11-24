@@ -98,9 +98,10 @@ def check_model_editor(page, new_name, replace_key=False):
 
 def check_recent_reading(page, collapsed_count, touch=False):
     page.get_by_role('link', name='书库', exact=True).click()
+    expect(page.get_by_role('heading',name='我的阅读室',exact=True)).to_be_visible()
     # This fixture modifies the server directly from another client. Explicitly
     # request its new snapshot rather than assert against the immediate cache.
-    page.evaluate('route({refresh:true})')
+    page.evaluate("async () => { await cacheRequests.get('/library'); await route({refresh:true}); }")
     cards = page.locator('.recent-card:visible')
     more = page.get_by_role('button', name='更多 →', exact=True)
     expect(cards).to_have_count(collapsed_count)
@@ -289,10 +290,37 @@ def main():
             check_recent_reading(page, 3)
             check_recent_reading(phone, 2, touch=True)
             page.get_by_role('link',name='设置',exact=True).click()
-            page.get_by_role('button',name='生成 / 重置同步码',exact=True).click()
+            page.get_by_label('同步设备名称',exact=True).fill('Office Chrome')
+            page.get_by_role('button',name='新增设备同步码',exact=True).click()
             code=page.get_by_label('阅读同步码',exact=True).input_value()
             assert len(code)>=32
             assert page.get_by_label('Web 同步地址',exact=True).input_value()==url
+            expect(page.locator('.sync-device')).to_have_count(1)
+            expect(page.locator('.sync-device')).to_contain_text('等待插件连接')
+            phone.get_by_role('link',name='设置',exact=True).click()
+            phone.get_by_label('同步设备名称',exact=True).fill('Home Chrome')
+            phone.get_by_role('button',name='新增设备同步码',exact=True).click()
+            second_code=phone.get_by_label('阅读同步码',exact=True).input_value()
+            assert second_code!=code
+            expect(phone.locator('.sync-device')).to_have_count(2)
+            assert phone.evaluate('document.documentElement.scrollWidth <= innerWidth')
+            assert phone.request.post(url+'/api/reading-sync/import',data={'articles':[]},
+                headers={'Authorization':'Bearer '+second_code}).status==200
+            phone.get_by_role('button',name='刷新设备列表',exact=True).click()
+            home=phone.locator('.sync-device').filter(has_text='Home Chrome')
+            expect(home).to_contain_text('最近成功同步')
+            phone.once('dialog',lambda dialog:dialog.dismiss())
+            home.get_by_role('button',name='停用此设备',exact=True).click()
+            expect(home).to_be_visible()
+            phone.once('dialog',lambda dialog:dialog.accept())
+            home.get_by_role('button',name='停用此设备',exact=True).click()
+            expect(phone.locator('.sync-device')).to_have_count(1)
+            expect(phone.get_by_label('阅读同步码',exact=True)).to_have_count(0)
+            assert phone.request.post(url+'/api/reading-sync/import',data={'articles':[]},
+                headers={'Authorization':'Bearer '+second_code}).status==401
+            page.reload()
+            expect(page.locator('.sync-device')).to_have_count(1)
+            expect(page.get_by_label('阅读同步码',exact=True)).to_have_count(0)
             metadata=dict(title='READING ACROSS DEVICES!',url='https://example.invalid/original',
                 wordCount=9999,readAt=int(time.time()*1000))
             before=page.request.get(url+'/api/reading-stats').json()
@@ -319,8 +347,11 @@ def main():
                 width=current.evaluate('() => ({scroll:document.documentElement.scrollWidth,width:innerWidth})')
                 assert width['scroll']<=width['width'],width
             page.get_by_role('link',name='设置',exact=True).click()
-            page.get_by_role('button',name='停用同步码',exact=True).click()
-            expect(page.locator('.sync-panel')).to_contain_text('同步已停用')
+            expect(page.locator('.sync-device')).to_contain_text('最近上传：1 条')
+            page.once('dialog',lambda dialog:dialog.accept())
+            page.get_by_role('button',name='停用全部同步码',exact=True).click()
+            expect(page.locator('.sync-device')).to_have_count(0)
+            expect(page.locator('.sync-panel')).to_contain_text('尚未开启插件阅读同步')
             assert not errors,errors
             assert not requests,requests
             print('BROWSER PASS: desktop + 390px touch phone; completed stats/dedup/search/source links/plugin pairing/retry; model editor, recent reading, modal wheel isolation, saved progress, wordbook, analysis, discussion; no overflow/errors')

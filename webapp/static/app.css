@@ -107,6 +107,16 @@ body:has(#sheet-wait:not([hidden])) #jobbar{display:none}
 .pwa-settings{margin-top:24px}.pwa-settings p{line-height:1.8}.pwa-update{position:fixed;z-index:25;left:16px;right:16px;bottom:calc(16px + env(safe-area-inset-bottom));max-width:600px;margin:auto;display:flex;align-items:center;justify-content:space-between;gap:14px;padding:12px 16px;background:var(--card);border:1px solid #cdd9c5;border-radius:12px;box-shadow:0 6px 24px #183f3526;font:13px/1.6 var(--sans)}.pwa-update .row{flex:none;gap:8px}.pwa-update button{min-height:44px;white-space:nowrap}body:has(#sheet[open]) .pwa-update,body:has(#selection-tools:not([hidden])) .pwa-update,body:has(.reader-remote-progress:not([hidden])) .pwa-update{display:none}@media(max-width:480px){.pwa-update{align-items:flex-start;flex-direction:column;gap:8px}.pwa-update .row{align-self:flex-end}}@media(display-mode:standalone){.site-footer{padding-bottom:calc(20px + env(safe-area-inset-bottom))}}
 @media(max-width:600px){.reader-remote-progress{width:calc(100vw - 24px);max-width:none;flex-wrap:wrap;gap:8px;padding:12px}.reader-remote-progress .row{width:100%}.reader-remote-progress button{min-height:44px;flex:1}}
 .hover-actions{flex-wrap:wrap;gap:8px}
+.sync-device-form{display:flex;align-items:flex-end;flex-wrap:wrap;gap:12px;margin:18px 0}
+.sync-device-form label{display:grid;gap:6px;flex:1;min-width:180px}
+.sync-device-form input{width:100%;box-sizing:border-box}
+.sync-panel>.form-stack:not([hidden]){padding:16px;margin:16px 0;background:var(--paper);border:1px solid var(--line);border-radius:12px;overflow-wrap:anywhere}
+.sync-devices{display:grid;margin-top:16px}
+.sync-device{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:16px 0;border-top:1px solid var(--line)}
+.sync-device-info{display:grid;gap:7px;min-width:0;overflow-wrap:anywhere}
+.sync-device>button{flex-shrink:0;min-height:44px}
+.sync-device-info .count{white-space:normal}
+@media(max-width:600px){.sync-device{align-items:flex-start;flex-direction:column}.sync-device>button{align-self:flex-end}.sync-device-form>button{width:100%}}
 .analysis-actions{display:flex;flex-wrap:wrap;gap:8px}.analysis-actions button{min-height:44px}
 .analysis-help{font-size:12px;line-height:1.7;margin:10px 0}.analysis-status{font-size:13px;line-height:1.7}
 .analysis-preview{margin-top:22px;padding:16px;border:1px dashed var(--muted);border-radius:12px}

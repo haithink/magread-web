@@ -1,11 +1,14 @@
 """Isolated completed-reading and restricted plugin-sync contract tests."""
 import hashlib
+from concurrent.futures import ThreadPoolExecutor
+import threading
 import time
 import unittest
 from unittest.mock import patch
 
 from run_web_tests import WebTests, config, store
 from webapp import reading_stats
+from webapp.reading_sync import SyncDevices
 
 
 class ReadingTests(unittest.TestCase):
@@ -114,7 +117,7 @@ class ReadingTests(unittest.TestCase):
     def test_sync_token_is_hashed_revocable_and_has_no_other_permissions(self):
         headers = self.pair()
         token = headers['Authorization'][7:]
-        text = (config.app_dir() / 'reading-sync-auth.json').read_text()
+        text = (config.app_dir() / 'reading-sync-auth.json').read_text(encoding='utf-8')
         self.assertNotIn(token, text)
         self.assertIn(hashlib.sha256(token.encode()).hexdigest(), text)
         client = self.app.test_client()
@@ -143,6 +146,98 @@ class ReadingTests(unittest.TestCase):
         self.assertEqual(client.post('/api/reading-sync/import', json={'articles':[self.record()]},
                                     headers={**headers, 'Host':'evil.invalid'}).status_code, 400)
         self.assertEqual(client.post('/api/reading-sync/import', data=b'x'*(129*1024), headers=headers).status_code, 413)
+
+    def test_multiple_devices_and_individual_revocation(self):
+        first = self.post('/reading-sync', {'name':'办公室 Chrome'}).json
+        second = self.post('/reading-sync', {'name':'家里 Chrome'}).json
+        self.assertNotEqual(first['token'], second['token'])
+        client = self.app.test_client()
+        def upload(pair, records):
+            return client.post('/api/reading-sync/import', json={'articles':records},
+                headers={'Authorization':'Bearer '+pair['token']})
+        status = self.client.get('/api/reading-sync').json
+        self.assertEqual(len(status['devices']), 2)
+        self.assertTrue(all(d['lastSyncAt'] is None for d in status['devices']))
+        self.assertEqual(upload(first, [self.record()]).status_code, 200)
+        self.assertEqual(upload(second, []).status_code, 200)
+        status = self.client.get('/api/reading-sync').json
+        self.assertTrue(all(d['lastSyncAt'] for d in status['devices']))
+        self.assertEqual(status['devices'][0]['lastBatchCount'], 1)
+        self.assertTrue(status['devices'][0]['lastUploadAt'])
+        self.assertIsNone(status['devices'][1]['lastUploadAt'])
+        # Empty connection checks preserve information about the last upload.
+        self.assertEqual(upload(first, []).status_code, 200)
+        self.assertEqual(self.client.get('/api/reading-sync').json['devices'][0]['lastBatchCount'], 1)
+        path = '/api/reading-sync/'+first['device']['id']
+        self.assertEqual(self.client.delete(path).status_code, 403)
+        self.assertEqual(client.delete(path, headers={'Authorization':'Bearer '+second['token']}).status_code, 401)
+        self.assertEqual(self.client.delete(path, headers=self.headers).status_code, 200)
+        self.assertEqual(upload(first, []).status_code, 401)
+        self.assertEqual(upload(second, [self.record()]).status_code, 200)
+        self.assertEqual(self.stats()['articleCount'], 1)
+        self.assertEqual(self.client.delete(path, headers=self.headers).status_code, 404)
+        serialized = self.client.get('/api/reading-sync').text
+        for pair in [first, second]:
+            self.assertNotIn(pair['token'], serialized)
+            self.assertNotIn(hashlib.sha256(pair['token'].encode()).hexdigest(), serialized)
+        self.client.delete('/api/reading-sync', headers=self.headers)
+        self.assertFalse(self.client.get('/api/reading-sync').json['enabled'])
+        self.assertEqual(upload(second, []).status_code, 401)
+
+    def test_legacy_code_migrates_without_disconnect_or_secret_disclosure(self):
+        legacy_token = 'previously-issued-sync-token'
+        path = config.app_dir() / 'reading-sync-auth.json'
+        store._atomic_json_write(path, {'tokenHash':hashlib.sha256(legacy_token.encode()).hexdigest()})
+        # Issuing a new code must also migrate correctly before a status GET.
+        new = self.pair()
+        client = self.app.test_client()
+        old = {'Authorization':'Bearer '+legacy_token}
+        for headers in [old, new]:
+            self.assertEqual(client.post('/api/reading-sync/import', json={'articles':[]}, headers=headers).status_code, 200)
+        status = self.client.get('/api/reading-sync').json
+        self.assertEqual(len(status['devices']), 2)
+        self.assertTrue(status['devices'][0]['legacy'])
+        self.assertIsNone(status['devices'][0]['createdAt'])
+        self.assertNotIn(legacy_token, path.read_text(encoding='utf-8'))
+        self.assertNotIn('tokenHash', status['devices'][0])
+        # A new registry instance reads the migrated codes after restart.
+        registry = SyncDevices(config.app_dir(), threading.RLock())
+        self.assertEqual(registry.authenticate(old['Authorization']), 'legacy')
+        self.assertTrue(registry.authenticate(new['Authorization']))
+
+    def test_rejected_sync_does_not_update_device_activity(self):
+        headers = self.pair()
+        client = self.app.test_client()
+        for records in [[{**self.record(), 'wordCount':-1}], None]:
+            self.assertEqual(client.post('/api/reading-sync/import', json={'articles':records}, headers=headers).status_code, 400)
+        device = self.client.get('/api/reading-sync').json['devices'][0]
+        self.assertIsNone(device['lastSyncAt'])
+        self.assertIsNone(device['lastUploadAt'])
+
+    def test_pair_validates_names_and_bounds_active_codes(self):
+        for name in [None, 3, [], 'x'*81, 'name\nline']:
+            self.assertEqual(self.post('/reading-sync', {'name':name}).status_code, 400)
+        registry = SyncDevices(config.app_dir(), threading.RLock())
+        for _ in range(50):
+            registry.pair('test')
+        self.assertEqual(self.post('/reading-sync', {}).status_code, 409)
+        self.assertEqual(len(self.client.get('/api/reading-sync').json['devices']), 50)
+
+    def test_concurrent_issuance_and_revoked_inflight_import(self):
+        registry = SyncDevices(config.app_dir(), threading.RLock())
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            pairs = list(pool.map(lambda i:registry.pair(f'device {i}'), range(12)))
+        self.assertEqual(len(registry.status()['devices']), 12)
+        self.assertEqual(len({p['device']['id'] for p in pairs}), 12)
+        for pair in pairs:
+            self.assertEqual(registry.authenticate('Bearer '+pair['token']), pair['device']['id'])
+        # Simulate revocation between the request guard and import handler.
+        device_id = registry.authenticate('Bearer '+pairs[0]['token'])
+        registry.revoke(device_id)
+        called = []
+        self.assertIsNone(registry.import_records(device_id, lambda:called.append(True)))
+        self.assertEqual(called, [])
+        self.assertTrue(registry.authenticate('Bearer '+pairs[1]['token']))
 
 
 if __name__ == '__main__':

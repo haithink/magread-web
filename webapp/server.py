@@ -25,6 +25,7 @@ from kandu import core_sentence
 from webapp import __version__
 from webapp import reading_stats
 from webapp import reading_activity
+from webapp.reading_sync import SyncDevices, DeviceLimit
 from webapp import pwa
 from webapp.diagnostics import Diagnostics, clean_event
 from webapp import word_meaning
@@ -175,6 +176,7 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare
     jobs = Jobs(diagnostics)
     app.extensions['jobs'] = jobs
     data_lock = threading.RLock()
+    sync_devices = SyncDevices(root, data_lock)
     book_locks = {}
     analysis_locks = [threading.Lock() for _ in range(64)]
     login_limiter = LoginLimiter(root / 'login-rate.sqlite3', auth['secret'])
@@ -306,10 +308,10 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare
             if request.content_length is None or request.content_length > 128 * 1024:
                 abort(413, '同步数据过大')
             credential = request.headers.get('Authorization', '')
-            saved = store._json_read(root / 'reading-sync-auth.json') or {}
-            supplied = hashlib.sha256(credential[7:].encode()).hexdigest() if credential.startswith('Bearer ') else ''
-            if not saved.get('tokenHash') or not secrets.compare_digest(supplied, saved['tokenHash']):
+            device_id = sync_devices.authenticate(credential)
+            if device_id is None:
                 abort(401, '阅读同步码无效，请在 Web 设置中重新生成')
+            request.environ['kandu.sync_device'] = device_id
             origin = request.headers.get('Origin', '')
             if origin and not origin.startswith('chrome-extension://') and origin.rstrip('/') != request.host_url.rstrip('/'):
                 abort(403, '拒绝跨站请求')
@@ -575,27 +577,33 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare
 
     @app.get('/api/reading-sync')
     def reading_sync_status():
-        saved = store._json_read(root / 'reading-sync-auth.json') or {}
-        return jsonify(enabled=bool(saved.get('tokenHash')))
+        return jsonify(sync_devices.status())
 
     @app.post('/api/reading-sync')
     def reading_sync_pair():
-        token = secrets.token_urlsafe(32)
-        with data_lock:
-            store._atomic_json_write(root / 'reading-sync-auth.json',
-                                     dict(tokenHash=hashlib.sha256(token.encode()).hexdigest()))
-        return jsonify(token=token)
+        try:
+            return jsonify(sync_devices.pair(payload().get('name', '')))
+        except DeviceLimit as error:
+            abort(409, str(error))
 
     @app.delete('/api/reading-sync')
     def reading_sync_revoke():
-        with data_lock:
-            store._atomic_json_write(root / 'reading-sync-auth.json', {})
+        sync_devices.revoke()
+        return jsonify(ok=True)
+
+    @app.delete('/api/reading-sync/<device_id>')
+    def reading_sync_revoke_device(device_id):
+        if not sync_devices.revoke(device_id):
+            abort(404, '该设备同步码已停用，请刷新列表')
         return jsonify(ok=True)
 
     @app.post('/api/reading-sync/import')
     def reading_sync_import():
-        with data_lock:
-            count = reading_stats.import_records(payload().get('articles'))
+        records = payload().get('articles')
+        count = sync_devices.import_records(request.environ['kandu.sync_device'],
+            lambda: reading_stats.import_records(records))
+        if count is None:
+            abort(401, '该设备同步码已停用，请在 Web 设置中新增设备')
         return jsonify(accepted=count)
 
     @app.get('/api/books/<book_id>/cover')

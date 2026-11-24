@@ -2006,23 +2006,57 @@ function readingCachePanel(){
 }
 
 function syncSettingsPanel(initial) {
-  const status=el('p',{class:'muted'},initial.enabled?'同步已启用。可在 Chrome 插件中上传已读文章。':'尚未开启插件阅读同步。');
+  const status=el('p',{class:'muted','aria-live':'polite'});
+  const devices=el('div',{class:'sync-devices'});
+  const name=el('input',{placeholder:'例如：办公室电脑 Chrome',maxlength:80,autocomplete:'off','aria-label':'同步设备名称'});
   const output=el('div',{class:'form-stack',hidden:true});
-  const panel=el('section',{class:'panel sync-panel'},el('h2',{},'Chrome 插件阅读同步'),
-    el('p',{class:'muted'},'把网页文章的标题、原文链接、总词数和完成时间汇总到已读统计。文章正文和模型密钥不会上传。'),status,
-    el('div',{class:'row'},button('生成 / 重置同步码',action(async()=>{
-      if(initial.enabled&&!confirm('重置后，已连接的插件需要填写新同步码。继续？'))return;
-      const {token}=await api('/reading-sync',{method:'POST',data:{}});initial.enabled=true;
-      status.textContent='同步码仅在此次生成后显示，请复制到插件设置。此码只能上传阅读记录。';
+  let issuedId=null;
+  const formatTime=value=>value?new Date(value).toLocaleString():'暂无记录';
+  const render=()=>{
+    const items=initial.devices||[];
+    status.textContent=items.length?`已启用 ${items.length} 个设备同步码。新增设备不会影响其他设备。`:'尚未开启插件阅读同步。';
+    devices.replaceChildren(...items.map(device=>el('article',{class:'sync-device'},
+      el('div',{class:'sync-device-info'},el('strong',{},device.name),
+        el('span',{class:'count'},device.lastSyncAt?'已连接 · 最近成功同步：'+formatTime(device.lastSyncAt):'等待插件连接 · 尚无成功同步记录'),
+        el('small',{class:'muted'},'创建：'+(device.createdAt?formatTime(device.createdAt):'旧版未记录')+
+          (device.lastUploadAt?` · 最近上传：${device.lastBatchCount} 条（${formatTime(device.lastUploadAt)}）`:'')),
+        device.legacy?el('small',{class:'muted'},'旧码继续有效，可能由多台设备共用；建议逐台改用独立同步码。'):null),
+      button('停用此设备',action(async()=>{
+        if(!confirm(`停用「${device.name}」的同步码？已上传的阅读记录会保留。`))return;
+        await api('/reading-sync/'+encodeURIComponent(device.id),{method:'DELETE'});
+        if(issuedId===device.id){output.replaceChildren();output.hidden=true;issuedId=null;}
+        await refresh();toast('该设备同步码已停用');
+      }))
+    )));
+  };
+  async function refresh(){initial=await api('/reading-sync');render();}
+  const form=el('form',{class:'sync-device-form'},el('label',{},'设备备注名称',name),
+    el('button',{type:'submit',class:'primary'},'新增设备同步码'));
+  form.onsubmit=action(async event=>{
+    event.preventDefault();
+    const submit=form.querySelector('button');submit.disabled=true;
+    try{
+      const {token,device}=await api('/reading-sync',{method:'POST',data:{name:name.value}});
+      issuedId=device.id;name.value='';
       const server=el('input',{value:location.origin,readonly:true,'aria-label':'Web 同步地址'});
       const code=el('input',{value:token,readonly:true,'aria-label':'阅读同步码',autocomplete:'off',spellcheck:false});
-      output.replaceChildren(el('label',{},'Web 地址',server),el('label',{},'同步码',code),
-        button('复制同步码',action(async()=>{await navigator.clipboard.writeText(token);toast('同步码已复制');})));output.hidden=false;
-    }),'primary'),button('停用同步码',action(async()=>{
-      await api('/reading-sync',{method:'DELETE'});initial.enabled=false;output.replaceChildren();output.hidden=true;
-      status.textContent='同步已停用，已上传的阅读记录保留。';
-    }))),output);
-  return panel;
+      output.replaceChildren(el('p',{},`「${device.name}」的同步码仅此次显示，请复制到这台设备的插件设置。`),
+        el('label',{},'Web 地址',server),el('label',{},'同步码',code),
+        button('复制同步码',action(async()=>{await navigator.clipboard.writeText(token);toast('同步码已复制');})));
+      output.hidden=false;await refresh();
+    }finally{submit.disabled=false;}
+  });
+  const panel=el('section',{class:'panel sync-panel'},el('h2',{},'Chrome 插件阅读同步'),
+    el('p',{class:'muted'},'把网页文章的标题、原文链接、总词数和完成时间汇总到已读统计。文章正文和模型密钥不会上传。'),status,
+    el('p',{class:'muted'},'每台设备请使用独立同步码；列表按同步码区分设备，并不代表实时在线状态。忘记旧码可直接新增，已保存的同步码无法再次显示。'),
+    form,output,el('div',{class:'row'},button('刷新设备列表',action(refresh)),
+      button('停用全部同步码',action(async()=>{
+        if(!initial.enabled)return;
+        if(!confirm('停用全部设备同步码？所有插件都需要填写新码，已上传的阅读记录会保留。'))return;
+        await api('/reading-sync',{method:'DELETE'});output.replaceChildren();output.hidden=true;issuedId=null;
+        await refresh();toast('全部同步码已停用');
+      }))),devices);
+  render();return panel;
 }
 
 async function readingStatsPage(token) {
