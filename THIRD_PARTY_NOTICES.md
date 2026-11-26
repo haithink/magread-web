@@ -22,6 +22,7 @@
 - 保留源词条的 `word`、`pos`、`phonetic`、`translation`、`exchange` 五个字段；词头去首尾空白、转小写，同词头保留最后一条值并按首次出现顺序导出 UTF-8 TSV，保持离线查词的大小写兼容。字段内真实制表符和换行替换为空格。
 - 来源和产物 SHA-256、行数及处理规则见 `kandu/assets/dictionary_sources.json`；ZIP 时间戳固定，可重复构建。
 - 复现：`python tools/build_dictionary_assets.py <固定版本的ecdict.csv>`。
+- 保留资源中的原始音标以维持可复现校验；运行时仅在音标字段将部分旧词条的 `^` 转为 IPA `ɡ`（例如 glutamate），兼容已有词典数据库及学习缓存，不改动释义或正文。
 
 ## CET-4 词表
 

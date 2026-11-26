@@ -12,6 +12,8 @@ const el = (tag, attrs = {}, ...children) => {
   return node;
 };
 const button = (text, callback, cls = '') => el('button', {type:'button', class:cls, onclick:callback}, text);
+// Old offline vocabulary/lookup caches may still contain ECDICT's caret for g.
+const phoneticText = value => typeof value==='string'?value.replaceAll('^','\u0261'):'';
 const state = {csrf:'', route:0, reader:null, selection:null, activeJobs:new Map(), jobObservers:new Map(), vocabWaits:new Map(), sheet:0, sheetWait:null};
 const view = $('#app');
 const readingId=()=>Array.from(crypto.getRandomValues(new Uint8Array(16)),v=>v.toString(16).padStart(2,'0')).join('');
@@ -1379,7 +1381,7 @@ function installVocabHover(reader,article) {
     }),'hover-collect');
     collect.disabled=!!entry.inWordbook;
     tip.replaceChildren(...[el('div',{class:'hover-heading'},el('strong',{},entry.word),el('span',{},[
-      entry.phonetic?'/'+entry.phonetic.replaceAll('/','')+'/':'',entry.pos||''].filter(Boolean).join('  '))),
+      entry.phonetic?'/'+phoneticText(entry.phonetic).replaceAll('/','')+'/':'',entry.pos||''].filter(Boolean).join('  '))),
       el('p',{class:'hover-sense'},entry.sense||'暂无释义'),
       entry.inText?el('p',{class:'hover-context'},entry.inText):null,
       entry.root?el('p',{class:'hover-detail'},'词根 / 词源 · '+entry.root):null,
@@ -1671,7 +1673,7 @@ function entryNode(entry,onSave,source=null) {
     collect.textContent='编辑收藏';toast('已加入个人生词本');if(onSave)await onSave();
   }));
   return el('div',{class:'vocab-entry'},el('div',{class:'entry-top'},el('div',{},el('span',{class:'vocab-word'},entry.word),
-      el('span',{class:'phonetic'},[entry.phonetic?'/'+entry.phonetic.replaceAll('/','')+'/':'',entry.pos||''].filter(Boolean).join('  '))),collect),
+      el('span',{class:'phonetic'},[entry.phonetic?'/'+phoneticText(entry.phonetic).replaceAll('/','')+'/':'',entry.pos||''].filter(Boolean).join('  '))),collect),
     entry.senseSource==='wordbook'?el('small',{class:'muted'},'个人收藏释义'):entry.senseSource==='dictionary'?el('small',{class:'muted'},'本地词典释义 · 可补充本文含义'):entry.senseSource==='phrase_rule'?el('small',{class:'muted'},'本地短语提示 · 可补充本文含义'):null,
     el('p',{class:'entry-sense'},entry.sense||''),entry.inText?el('p',{class:'quote'},entry.inText):null,
     entry.root?el('p',{class:'entry-root'},entry.root):null,entry.note?el('p',{class:'entry-root'},'笔记 · '+entry.note):null);
@@ -1758,7 +1760,7 @@ async function lookupSelection(reader) {
   const context=el('section',{class:'lookup-context','aria-live':'polite'});
   const details=el('details',{class:'lookup-dictionary'},el('summary',{},'词典 / 个人释义 · 已加入个人生词本'),
     entryNode({...response.saved,inWordbook:true,senseSource:'wordbook'}));
-  output.replaceChildren(el('div',{class:'lookup-word'},el('strong',{},chosen.quote),el('span',{class:'phonetic'},response.saved.phonetic||'')),
+  output.replaceChildren(el('div',{class:'lookup-word'},el('strong',{},chosen.quote),el('span',{class:'phonetic'},phoneticText(response.saved.phonetic))),
     context,details,sourceNode({...response.saved.source,contextMeaning:null}));
   const refreshVocab=()=>{if(state.reader===reader)return loadVocab(reader,{fresh:true});};
   const explain=async()=>{
@@ -1938,6 +1940,7 @@ async function wordbookPage(token) {
 async function editWord(word='') {
   let initial={word};if(word){const data=await api('/wordbook?q='+encodeURIComponent(word));initial=data.words.find(w=>w.word===word)||initial;}
   const fields={};const form=el('form',{class:'form-stack'});
+  initial.phonetic=phoneticText(initial.phonetic);
   for(const [key,label]of [['word','单词 / 短语'],['phonetic','音标'],['pos','词性'],['sense','释义'],['root','词根 / 用法'],['note','个人笔记']]){
     const input=el(['sense','root','note'].includes(key)?'textarea':'input',{value:['sense','root','note'].includes(key)?null:initial[key]||'',required:key==='word'});
     if(input.tagName==='TEXTAREA')input.value=initial[key]||'';

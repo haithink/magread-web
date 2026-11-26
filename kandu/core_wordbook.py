@@ -7,6 +7,7 @@ import time
 from contextlib import contextmanager
 
 from . import core_config as cfgmod
+from .core_phonetics import normalize as normalize_phonetic
 
 
 def normalize(word):
@@ -39,6 +40,7 @@ def _record(row):
     if row is None:
         return None
     value = dict(row)
+    value['phonetic'] = normalize_phonetic(value['phonetic'])
     value['aliases'] = json.loads(value['aliases'])
     value['source'] = json.loads(value['source'])
     return value
@@ -90,7 +92,7 @@ def _write(db, r):
     db.execute('''INSERT OR REPLACE INTO words
         (word,phonetic,pos,sense,root,note,aliases,source,created_at,updated_at,lookups)
         VALUES (?,?,?,?,?,?,?,?,?,?,?)''',
-        (r['word'], r.get('phonetic', ''), r.get('pos', ''), r.get('sense', ''), r.get('root', ''),
+        (r['word'], normalize_phonetic(r.get('phonetic', '')), r.get('pos', ''), r.get('sense', ''), r.get('root', ''),
          r.get('note', ''), json.dumps(r['aliases'], ensure_ascii=False),
          json.dumps(r['source'], ensure_ascii=False), r['created_at'], r['updated_at'], r['lookups']))
 

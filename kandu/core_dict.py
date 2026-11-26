@@ -7,6 +7,7 @@ from pathlib import Path
 
 from . import core_config as cfgmod
 from .core_gen import lemma_forms
+from .core_phonetics import normalize as normalize_phonetic
 
 STATE = {"ready": False, "building": False, "error": ""}
 _LOCK = threading.Lock()
@@ -93,7 +94,7 @@ def _query_one(con, word: str):
     ).fetchone()
     if not row:
         return None
-    return {"word": row[0], "pos": row[1], "phonetic": row[2], "translation": row[3], "exchange": row[4]}
+    return {"word": row[0], "pos": row[1], "phonetic": normalize_phonetic(row[2]), "translation": row[3], "exchange": row[4]}
 
 
 def lookup(word: str):

@@ -13,6 +13,7 @@ from bs4 import BeautifulSoup
 
 from . import core_config as cfgmod
 from . import core_pdf
+from .core_phonetics import normalize_fields as normalize_phonetics
 
 PDF_PARSER_VERSION = core_pdf.PARSER_VERSION
 _CONTENT_LOCKS = {}
@@ -572,13 +573,13 @@ def has_digest(book_id: str) -> bool:
 
 
 def load_vocab(book_id: str, article_index: int, level: str):
-    return _json_read(_cache_dir(book_id) / f"vocab_{article_index}_{level}.json")
+    return normalize_phonetics(_json_read(_cache_dir(book_id) / f"vocab_{article_index}_{level}.json"))
 
 
 def save_vocab(book_id: str, vocab: dict):
     _json_write(
         _cache_dir(book_id) / f"vocab_{vocab['articleIndex']}_{vocab['level']}.json",
-        vocab,
+        normalize_phonetics(vocab),
     )
 
 
@@ -588,13 +589,13 @@ def analysis_key(book_id: str, article_index: int, text: str, identity='') -> st
 
 
 def load_analysis(book_id: str, text: str, article_index: int, identity=''):
-    return _json_read(_cache_dir(book_id) / f"analysis_{analysis_key(book_id, article_index, text, identity)}.json")
+    return normalize_phonetics(_json_read(_cache_dir(book_id) / f"analysis_{analysis_key(book_id, article_index, text, identity)}.json"))
 
 
 def save_analysis(book_id: str, text: str, article_index: int, analysis: dict, identity=''):
     _atomic_json_write(
         _cache_dir(book_id) / f"analysis_{analysis_key(book_id, article_index, text, identity)}.json",
-        analysis,
+        normalize_phonetics(analysis),
     )
 
 
