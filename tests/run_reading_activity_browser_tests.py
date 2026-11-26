@@ -262,7 +262,7 @@ def main():
                     page.get_by_role('link',name='已读统计',exact=True).click()
                     expect(page.get_by_role('heading',name='已读统计',exact=True)).to_be_visible()
                     expect(page.locator('.reading-chart')).to_have_count(2)
-                    expect(page.locator('.reading-heatmap button')).to_have_count(77+(datetime.now(timezone.utc)+timedelta(hours=8)).weekday()+1)
+                    expect(page.locator('.reading-heatmap button')).to_have_count(365)
                     expect(page.locator('.reading-source-row')).to_have_count(2)
                     expect(page.locator('.completed-card').filter(has_text=old['title'])).to_contain_text('未计时')
                     expect(page.locator('.completed-card').filter(has_text=article['title'])).to_contain_text('有效阅读')

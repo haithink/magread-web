@@ -100,22 +100,62 @@ function readingAnalyticsPanel(analytics) {
   root.append(chartGrid);
 
   const extra=node('div',{class:'reading-insights-grid'});
-  const calendar=node('section',{class:'reading-chart-panel reading-calendar'},node('h3',{},'阅读日历'),
-    node('p',{class:'count'},`最近 12 周 · 最长连续 ${analytics.longestStreak} 天 · 颜色代表${readingLabel}`));
-  const cells=node('div',{class:'reading-heatmap','aria-label':'最近 12 周阅读日历'});
-  const calendarDetail=node('p',{class:'reading-chart-detail','aria-live':'polite'},'选择一天查看阅读时长和词数。');
-  const lastDay=new Date(analytics.daily.at(-1).date+'T12:00:00Z');
-  const calendarDays=analytics.daily.slice(-(77+(lastDay.getUTCDay()+6)%7+1));
-  calendar.append(node('div',{class:'calendar-date-range'},calendarDays[0].date+' — '+calendarDays.at(-1).date));
-  for(const row of calendarDays) {
+  const calendarDays=analytics.daily.slice(-365);
+  const firstDay=new Date(calendarDays[0].date+'T12:00:00Z');
+  const leading=firstDay.getUTCDay(),weeks=Math.ceil((leading+calendarDays.length)/7);
+  const calendar=node('section',{class:'reading-chart-panel reading-calendar','aria-label':'阅读日历'});
+  const calendarSummary=node('p',{class:'calendar-summary'},
+    node('strong',{},fmt(calendarDays.reduce((sum,day)=>sum+day[readingKey],0))),` 词 · ${calendarDays.filter(day=>day[readingKey]>0||day.activeMs>0).length} 个阅读日`,
+    node('span',{class:'count'},`最长连续 ${analytics.longestStreak} 天`));
+  calendar.append(node('div',{class:'calendar-heading'},node('div',{},node('h3',{},'阅读日历'),calendarSummary),
+    node('span',{class:'calendar-period'},calendarDays.length===365?'最近一年':`最近 ${calendarDays.length} 天`)));
+  const cells=node('div',{class:'reading-heatmap',role:'group','aria-label':'每日阅读词数日历'});
+  const months=node('div',{class:'heatmap-months','aria-hidden':'true'});
+  const graph=node('div',{class:'heatmap-graph'},months,cells);
+  graph.style.setProperty('--heatmap-weeks',weeks);
+  const scroller=node('div',{class:'heatmap-scroll',role:'region','aria-label':'全年阅读日历，可左右滑动'},graph);
+  const calendarDetail=node('p',{class:'reading-chart-detail','aria-live':'polite'},'点击日期方格查看阅读详情；颜色越深，阅读词数越多。');
+  const monthLabels=[];
+  calendarDays.forEach((row,index)=>{
+    if(index===0||row.date.slice(5,7)!==calendarDays[index-1].date.slice(5,7))
+      monthLabels.push({column:Math.floor((leading+index)/7),month:Number(row.date.slice(5,7))});
+  });
+  monthLabels.forEach((label,index)=>{
+    const room=(monthLabels[index+1]?.column??weeks)-label.column;
+    if(room>=2){
+      const month=node('span',{},`${label.month}月`);
+      month.style.gridColumn=`${label.column+1} / span ${Math.min(3,room)}`;month.style.gridRow='1';months.append(month);
+    }
+  });
+  for(let i=0;i<leading;i++)cells.append(node('span',{class:'heatmap-padding','aria-hidden':'true'}));
+  const dayButtons=[];
+  for(const [index,row] of calendarDays.entries()) {
     const words=row[readingKey],minutes=row.activeMs/60000,level=words>=10000?4:words>=5000?3:words>=2000?2:words>0?1:0;
     const text=`${row.date} · ${readingLabel} ${fmt(words)} 词 · ${minutes>0?Math.round(minutes)+' 分钟':'无计时记录'} · 计时阅读 ${fmt(row.measuredWords)} 词 · 读完 ${row.completedArticles} 篇`;
-    const cell=node('button',{type:'button',class:'heatmap-cell heat-level-'+level,title:text,'aria-label':text,'data-date':row.date});
-    const describe=()=>{calendarDetail.textContent=text;};
+    const cell=node('button',{type:'button',class:'heatmap-cell heat-level-'+level,title:text,'aria-label':text,'data-date':row.date,
+      tabindex:index===calendarDays.length-1?'0':'-1','aria-pressed':'false'});
+    const describe=()=>{
+      calendarDetail.textContent=text;
+      for(const button of dayButtons){button.tabIndex=button===cell?0:-1;button.setAttribute('aria-pressed',String(button===cell));}
+    };
+    cell.addEventListener('keydown',event=>{
+      const offset={ArrowLeft:-7,ArrowRight:7,ArrowUp:-1,ArrowDown:1}[event.key];
+      if(offset===undefined&&event.key!=='Home'&&event.key!=='End')return;
+      event.preventDefault();
+      const target=event.key==='Home'?0:event.key==='End'?dayButtons.length-1:Math.max(0,Math.min(dayButtons.length-1,index+offset));
+      dayButtons[target].focus({preventScroll:true});dayButtons[target].scrollIntoView({block:'nearest',inline:'nearest'});
+    });
+    dayButtons.push(cell);
     cell.addEventListener('focus',describe);cell.addEventListener('pointerenter',describe);cell.addEventListener('click',describe);cells.append(cell);
   }
-  const weekdays=node('div',{class:'heatmap-weekdays','aria-hidden':'true'},...['一','二','三','四','五','六','日'].map(day=>node('span',{},day)));
-  calendar.append(node('div',{class:'heatmap-layout'},weekdays,cells),node('div',{class:'heatmap-legend'},'少',...[0,1,2,3,4].map(i=>node('span',{class:'heatmap-cell heat-level-'+i,'aria-hidden':'true'})),'多'),calendarDetail);
+  for(let i=leading+calendarDays.length;i<weeks*7;i++)cells.append(node('span',{class:'heatmap-padding','aria-hidden':'true'}));
+  const weekdays=node('div',{class:'heatmap-weekdays','aria-hidden':'true'},...['','一','','三','','五',''].map(day=>node('span',{},day?`周${day}`:'')));
+  calendar.append(node('div',{class:'heatmap-layout'},weekdays,scroller),
+    node('div',{class:'calendar-footer'},node('span',{class:'calendar-date-range'},calendarDays[0].date+' — '+calendarDays.at(-1).date),
+      node('span',{class:'calendar-scroll-hint'},'左右滑动查看全年'),
+      node('div',{class:'heatmap-legend','aria-label':`${readingLabel}颜色：灰色为零，绿色由浅到深依次为不足 2,000、2,000 至 4,999、5,000 至 9,999、至少 10,000 词`},
+        '少',...[0,1,2,3,4].map(i=>node('span',{class:'heatmap-cell heat-level-'+i,'aria-hidden':'true'})),'多')),calendarDetail);
+  requestAnimationFrame(()=>{scroller.scrollLeft=scroller.scrollWidth-scroller.clientWidth;});
   const sourceMode=node('select',{'aria-label':'阅读来源统计范围'},
     node('option',{value:'all'},'全部阅读（含未完成）'),node('option',{value:'completed'},'仅已完成'));
   // Older offline snapshots contain completed sources only; label them accurately.
@@ -137,7 +177,7 @@ function readingAnalyticsPanel(analytics) {
     }
   };
   sourceMode.addEventListener('change',drawSources);drawSources();
-  extra.append(calendar,sources);root.append(extra);
+  extra.append(sources);root.append(calendar,extra);
   root.append(node('details',{class:'reading-measurement-notes'},node('summary',{},'阅读量和速度如何计算？'),
     node('p',{},'累计实际阅读词数（估算）＝已完成文章全文词数＋未读完文章的计时阅读估算，与图表日期范围无关。历史已读文章和 Chrome 同步完成记录也按全文计入；完成后用全文词数替换此前部分阅读量，不再重复叠加。已完成同标题各出处取最大全文词数；未完成同标题各出处取最大的累计计时词数。提前标记已读也按全文计算。'),
     node('p',{},'来源分布默认包含未完成文章，统计全部历史，不受曲线日期范围影响。同标题未完成文章归入累计计时词数最多的出处，相同则取最早记录；完成后归入最早完成的出处，每篇只计一次。尚未产生计时词数的文章不会计入来源阅读量。'),
