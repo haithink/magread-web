@@ -508,6 +508,7 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare
         books, recent = [], []
         library = store.load_library()
         digests = {meta['id']: store.load_digest(meta['id']) or {} for meta in library}
+        article_states = {meta['id']: store.load_article_states(meta['id']) for meta in library}
         counts = article_duplicates.library_counts(library, digests)
         for meta in library:
             publication = meta.get('publication') or re.sub(r'[_ .-]*\d{4}.*$', '', meta['fileName']).replace('_', ' ').strip() or '其他刊物'
@@ -520,12 +521,14 @@ def create_app(allowed_hosts=(), secure_cookie=False, https_hosts=(), cloudflare
             if not podcast_library.source_id(meta):
                 books.append(card)
             for idx, record in store.load_reading_history(meta['id']).items():
+                if article_states[meta['id']].get(idx) == 'read':
+                    continue
                 recent.append(dict(record, bookId=meta['id'], articleIndex=int(idx), bookTitle=meta.get('title') or meta['fileName']))
         for source_id in dict.fromkeys(filter(None, (podcast_library.source_id(m) for m in library))):
             meta = podcast_library.metadata(podcast_library.PREFIX + source_id, library)
             books.append(podcast_library.card(meta, podcast_library.episodes(source_id, library), digests))
         recent.sort(key=lambda r: r['lastReadAt'], reverse=True)
-        return jsonify(books=books, recent=recent[:80])
+        return jsonify(books=books, recent=recent[:80], articleStates=article_states)
 
     @app.get('/api/podcast-sources')
     def podcast_sources():

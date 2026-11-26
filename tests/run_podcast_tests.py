@@ -240,7 +240,8 @@ class PodcastTests(unittest.TestCase):
         read = self.client.get('/api/books/'+bid+'/articles/0').json
         self.assertEqual(read['parentBookId'], sid)
         recent = self.client.get('/api/library').json['recent']
-        self.assertIn(bid, [r['bookId'] for r in recent])
+        self.assertNotIn(bid, [r['bookId'] for r in recent])
+        self.assertEqual(self.client.get('/api/library').json['articleStates'][bid]['0'], 'read')
         with patch.object(llm, 'conversation', side_effect=AssertionError('Must reuse summaries')):
             job = self.wait_job(self.post('/books/'+sid+'/generate-digest', {}))
             self.assertEqual(job['state'], 'done', job)

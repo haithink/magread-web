@@ -1,4 +1,4 @@
-"""Publication-local recent reading, completed history and resume in an isolated library."""
+"""Unfinished recent reading and resume in an isolated library."""
 import os
 from pathlib import Path
 import threading
@@ -67,28 +67,28 @@ def main():
                 recent=page.get_by_role('region',name='本刊最近阅读',exact=True)
                 links=recent.locator('.issue-recent-link')
                 expect(links).to_have_count(3)
-                expect(recent.locator('.count')).to_have_text('本刊 · 8 篇')
-                expect(recent.locator('.issue-recent-title')).to_have_text([titles[i] for i in [0,8,6]])
+                expect(recent.locator('.count')).to_have_text('本刊 · 7 篇')
+                expect(recent.locator('.issue-recent-title')).to_have_text([titles[i] for i in [0,8,5]])
                 expect(links.first).to_have_attribute('href','#/read/issue/0')
                 expect(links.first.locator('.issue-recent-position')).to_contain_text('第 6 段 · 32%')
-                expect(links.locator('.issue-recent-state')).to_have_text(['阅读中','已到文末','已读'])
+                expect(links.locator('.issue-recent-state')).to_have_text(['阅读中','已到文末','已到文末'])
                 assert page.locator('.article-card').filter(has=page.get_by_role('heading',name=titles[0],exact=True)).count()==0
                 assert recent.bounding_box()['y']<page.get_by_role('searchbox',name='搜索文章').bounding_box()['y']
                 before=len(requests)
                 more=recent.get_by_role('button',name='更多',exact=True)
                 more.tap() if mobile else more.click()
-                expect(links).to_have_count(8)
-                expect(recent.locator('.issue-recent-title')).to_have_text([titles[i] for i in [0,8,6,5,4,3,2,1]])
+                expect(links).to_have_count(7)
+                expect(recent.locator('.issue-recent-title')).to_have_text([titles[i] for i in [0,8,5,4,3,2,1]])
                 expect(recent.get_by_role('button',name='收起',exact=True)).to_have_attribute('aria-expanded','true')
                 search=page.get_by_role('searchbox',name='搜索文章')
                 search.fill('no such article')
                 expect(page.locator('.article-card')).to_have_count(0)
-                expect(links).to_have_count(8)
+                expect(links).to_have_count(7)
                 search.fill('')
                 page.get_by_role('button',name='未读 7',exact=True).click()
-                expect(links).to_have_count(8)
+                expect(links).to_have_count(7)
                 page.locator('#show-duplicate-articles').check()
-                expect(links).to_have_count(8)
+                expect(links).to_have_count(7)
                 assert len(requests)==before,requests[before:]
                 recent.get_by_role('button',name='收起',exact=True).click()
                 expect(links).to_have_count(3)
@@ -103,31 +103,40 @@ def main():
                 page.get_by_role('link',name='← 目录',exact=True).click()
                 expect(page.get_by_role('button',name='未读 7',exact=True)).to_have_class('active')
                 expect(links.first).to_have_attribute('href','#/read/issue/0')
-                # Completed items stay accessible; uninteresting items are removed.
+                # Read and uninteresting items immediately leave recent reading.
                 card=page.locator('.article-card').filter(has=page.get_by_role('heading',name=titles[4],exact=True))
                 card.get_by_role('combobox',name='文章标记').select_option('read')
                 expect(card).to_have_count(0)
-                expect(recent.locator('.count')).to_have_text('本刊 · 8 篇')
+                expect(recent.locator('.count')).to_have_text('本刊 · 6 篇')
                 recent.get_by_role('button',name='更多',exact=True).click()
-                expect(recent.locator('.issue-recent-link[href="#/read/issue/4"] .issue-recent-state')).to_have_text('已读')
+                expect(recent.locator('.issue-recent-link[href="#/read/issue/4"]')).to_have_count(0)
                 card=page.locator('.article-card').filter(has=page.get_by_role('heading',name=titles[3],exact=True))
                 card.get_by_role('combobox',name='文章标记').select_option('uninterested')
                 expect(card).to_have_count(0)
-                expect(recent.locator('.count')).to_have_text('本刊 · 7 篇')
-                expect(links).to_have_count(7)
+                expect(recent.locator('.count')).to_have_text('本刊 · 5 篇')
+                expect(links).to_have_count(5)
                 expect(recent.locator('.issue-recent-link[href="#/read/issue/3"]')).to_have_count(0)
-                # Reproduce an issue whose only two histories are manually read
-                # at partial progress: its recent panel must remain visible.
+                # Read articles remain accessible via All, without shortcuts.
                 page.goto(base+'/#/book/completed')
                 expect(page.get_by_role('button',name='未读 0',exact=True)).to_have_class('active')
                 expect(page.locator('.article-card')).to_have_count(0)
                 page.get_by_role('button',name='全部 2',exact=True).click()
                 expect(page.locator('.article-card')).to_have_count(2)
+                expect(recent).not_to_be_visible()
+                # A local progress sample must not restore a read home shortcut.
+                page.evaluate('(history)=>localReading.set("/books/issue/articles/4",history)',histories['4'])
+                page.get_by_role('link',name='书库',exact=True).click()
+                expect(page.locator('.recent-card')).not_to_have_count(0)
+                page.get_by_role('button',name='更多 →',exact=True).click()
+                for href in ['#/read/issue/4','#/read/issue/6','#/read/completed/0','#/read/completed/1']:
+                    expect(page.locator(f'.recent-card[href="{href}"]')).to_have_count(0)
+                expect(page.locator('.recent-card[href="#/read/issue/5"]')).to_have_count(1)
+                # Reverting a read mark restores the saved reading shortcut.
+                page.goto(base+'/#/book/completed')
+                page.get_by_role('button',name='已读 2',exact=True).click()
+                page.locator('.article-card').first.get_by_role('combobox',name='文章标记').select_option('unread')
                 expect(recent).to_be_visible()
-                expect(recent.locator('.count')).to_have_text('本刊 · 2 篇')
-                expect(recent.locator('.issue-recent-title')).to_have_text(completed_titles)
-                expect(recent.locator('.issue-recent-state')).to_have_text(['已读','已读'])
-                expect(recent.get_by_role('button',name='更多',exact=True)).not_to_be_visible()
+                expect(recent.locator('.issue-recent-title')).to_have_text(completed_titles[0])
                 # No reading history leaves no empty panel or literal null on the page.
                 page.goto(base+'/#/book/older')
                 expect(page.locator('.digest-head h1')).to_have_text('Wired_2026.08.02')
@@ -145,7 +154,7 @@ def main():
                 context.close()
             browser.close()
         assert not errors,errors
-        print('ISSUE RECENT PASS: desktop/touch phone, current issue only, recent read/completed/ongoing histories, completed-only issue, more/collapse, independent filters and duplicates, saved paragraph resume, immediate state update, empty state, no extra fetch/model calls')
+        print('ISSUE RECENT PASS: desktop/touch phone; exclude explicit read marks on home and issue pages, local progress merge, end-scroll retained, unread restoration, more/collapse, filters/duplicates, paragraph resume, no model calls')
     finally:
         server.shutdown();server.server_close();thread.join(timeout=5)
         WebTests.tearDownClass()

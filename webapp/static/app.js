@@ -225,6 +225,11 @@ async function api(path,options={}){
   if(options.method&&options.method!=='GET'&&!['/login','/logout'].includes(path)&&!path.startsWith('/settings/')){
     if(path==='/wordbook'||path.startsWith('/wordbook/'))await ReadingCache.remove(key=>key.startsWith('meaning:'));
     await staleReadingCache();
+    if(/^\/books\/[^/]+\/state$/.test(path)){
+      const bookPath=path.slice(0,-'/state'.length),reader=state.reader;
+      const parentPath=reader&&bookPath===`/books/${encodeURIComponent(reader.bookId)}`&&reader.parentBookId?`/books/${encodeURIComponent(reader.parentBookId)}`:null;
+      await ReadingCache.remove(key=>key==='/library'||key===bookPath||key===parentPath);
+    }
   }
   return value;
 }
@@ -531,6 +536,8 @@ async function library(token,{fresh=false}={}) {
       data.recent=data.recent.filter(r=>r!==previous);data.recent.push({...history,bookId,articleIndex});
     }
   }
+  // Local position samples must not restore a shortcut removed by a read mark.
+  data.recent=data.recent.filter(r=>data.articleStates?.[r.bookId]?.[r.articleIndex]!=='read');
   data.recent.sort((a,b)=>b.lastReadAt-a.lastReadAt);data.recent=data.recent.slice(0,80);
   const content=el('div');
   state.pwaCleanup?.();
@@ -676,9 +683,9 @@ function issueRecentReading(articles,articleLink,isSeries) {
   const section=el('section',{class:'issue-recent',id:'issue-recent',hidden:true,'aria-label':isSeries?'本系列最近阅读':'本刊最近阅读'},
     el('div',{class:'issue-recent-heading'},el('h2',{},'最近阅读'),count,more),list);
   function render() {
-    // Completion does not remove a reading shortcut: readers also return to
-    // finished articles. Search, tags and duplicate hiding stay independent.
-    const recent=articles.filter(a=>a.history?.lastReadAt>0&&a.state!=='uninterested')
+    // Only an explicit read mark removes a completed shortcut, not scrolling to
+    // the end. Search, tags and duplicate hiding stay independent.
+    const recent=articles.filter(a=>a.history?.lastReadAt>0&&a.state!=='read'&&a.state!=='uninterested')
       .sort((a,b)=>b.history.lastReadAt-a.history.lastReadAt||a.index-b.index);
     section.hidden=!recent.length;
     if(recent.length<=3)expanded=false;

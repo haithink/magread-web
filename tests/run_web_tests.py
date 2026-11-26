@@ -208,6 +208,14 @@ class WebTests(unittest.TestCase):
         self.assertEqual(self.post('/books/sample/articles/0/progress',dict(paragraphIndex=-1)).status_code,400)
         self.assertEqual(self.post('/books/sample/state',dict(articleIndex=0,state='uninterested')).status_code,200)
         self.assertEqual(other.get('/api/books/sample').json['articles'][0]['state'],'uninterested')
+        history = store.load_reading_history('sample')
+        self.assertEqual(self.post('/books/sample/state',dict(articleIndex=0,state='read')).status_code,200)
+        library = other.get('/api/library').json
+        self.assertNotIn(('sample',0),[(r['bookId'],r['articleIndex']) for r in library['recent']])
+        self.assertEqual(library['articleStates']['sample']['0'],'read')
+        self.assertEqual(store.load_reading_history('sample'),history)
+        self.assertEqual(self.post('/books/sample/state',dict(articleIndex=0,state='unread')).status_code,200)
+        self.assertIn(('sample',0),[(r['bookId'],r['articleIndex']) for r in other.get('/api/library').json['recent']])
         self.assertEqual(self.post('/books/sample/state',dict(articleIndex=0,state='invalid')).status_code,400)
 
     def test_wordbook_lookup_overlay_crud(self):
