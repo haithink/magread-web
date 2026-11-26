@@ -710,7 +710,7 @@ async function digestPage(bookId,token) {
   const topicKey='kandu-topic:'+bookId;
   let topic=sessionStorage.getItem(topicKey)||'';
   const topics=el('div',{class:'topic-filters',role:'group','aria-label':'主题标签'});
-  let filter='all';const grid=el('div',{class:'article-grid'}),tabs=el('div',{class:'tabs'});
+  let filter='unread';const grid=el('div',{class:'article-grid'}),tabs=el('div',{class:'tabs'});
   const duplicateCount=data.articles.filter(a=>a.earlierOccurrence).length;
   const showDuplicates=el('input',{type:'checkbox',id:'show-duplicate-articles'});
   const issueCount=el('span',{class:'count',id:'issue-article-count','aria-live':'polite'});
